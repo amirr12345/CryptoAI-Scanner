@@ -1,19 +1,32 @@
 import requests
 
-BASE_URL = "https://apiv2.nobitex.ir"
+from base import ExchangeBase
 
-def get_stats(symbol="btc", market="rls"):
-    url = f"{BASE_URL}/market/stats"
 
-    params = {
-        "srcCurrency": symbol,
-        "dstCurrency": market
-    }
+class NobitexExchange(ExchangeBase):
 
-    try:
+    BASE_URL = "https://apiv2.nobitex.ir"
+
+    def get_markets(self):
+
+        url = self.BASE_URL + "/market/stats"
+
+        response = requests.get(url, timeout=10)
+
+        response.raise_for_status()
+
+        return response.json()
+
+    def get_ticker(self, symbol):
+
+        url = self.BASE_URL + "/market/stats"
+
         response = requests.get(
             url,
-            params=params,
+            params={
+                "srcCurrency": symbol,
+                "dstCurrency": "rls"
+            },
             timeout=10
         )
 
@@ -21,6 +34,5 @@ def get_stats(symbol="btc", market="rls"):
 
         return response.json()
 
-    except Exception as e:
-        print(e)
-        return None
+    def get_orderbook(self, symbol):
+        return {}
