@@ -1,18 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List
-
+from api.models import Ticker
 
 class ExchangeBase(ABC):
-    """کلاس پایه برای همه صرافی‌ها"""
 
     @abstractmethod
-    def get_markets(self) -> List[Dict]:
+    def get_ticker(self, symbol: str) -> Ticker:
         pass
 
     @abstractmethod
-    def get_ticker(self, symbol: str) -> Dict:
-        pass
-
-    @abstractmethod
-    def get_orderbook(self, symbol: str) -> Dict:
+    def get_markets(self):
         pass

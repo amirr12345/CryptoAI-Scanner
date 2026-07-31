@@ -4,12 +4,9 @@ from api.nobitex import NobitexExchange
 class MarketService:
 
     def __init__(self):
+
         self.exchange = NobitexExchange()
 
-    def get_btc_price(self):
+    def btc(self):
 
-        data = self.exchange.get_ticker("btc")
-
-        stats = data["stats"]["btc-rls"]
-
-        return float(stats["latest"])
+        return self.exchange.get_ticker("btc")
