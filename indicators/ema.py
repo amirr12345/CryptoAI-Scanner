@@ -1,13 +1,16 @@
 import pandas as pd
+from indicators.base_indicator import BaseIndicator
 
 
-class EMAIndicator:
+class EMAIndicator(BaseIndicator):
 
-    @staticmethod
-    def calculate(close_prices, period=20):
+    def __init__(self, period: int):
+        self.period = period
 
-        df = pd.DataFrame(close_prices, columns=["close"])
+    def calculate(self, data: pd.DataFrame):
 
-        ema = df["close"].ewm(span=period, adjust=False).mean()
-
-        return ema
+        return (
+            data["close"]
+            .ewm(span=self.period, adjust=False)
+            .mean()
+        )
