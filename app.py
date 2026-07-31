@@ -38,3 +38,34 @@ print(f"Volume: {btc.volume}")
 
 print()
 print("Scanner Ready")
+
+from services.history_service import HistoryService
+
+history = HistoryService()
+
+data = history.get_history()
+
+print()
+print("=" * 60)
+print("History Download")
+print("=" * 60)
+
+print(data.keys())
+
+print("Candles :", len(data["t"]))
+
+from indicators.ema import EMAIndicator
+
+close_prices = data["c"]
+
+ema20 = EMAIndicator.calculate(close_prices, 20)
+ema50 = EMAIndicator.calculate(close_prices, 50)
+
+print()
+print("=" * 50)
+print("EMA")
+print("=" * 50)
+
+print("Last Close :", close_prices[-1])
+print("EMA20      :", round(ema20.iloc[-1], 2))
+print("EMA50      :", round(ema50.iloc[-1], 2))
