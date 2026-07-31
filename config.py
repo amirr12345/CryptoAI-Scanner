@@ -4,7 +4,7 @@
 # ================================
 
 APP_NAME = "Crypto AI Scanner Pro"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 SCAN_INTERVAL = 30
 

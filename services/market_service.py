@@ -1,12 +1,13 @@
-from api.nobitex import NobitexExchange
+from repositories.market_repository import MarketRepository
 
 
 class MarketService:
 
     def __init__(self):
+        self.repository = MarketRepository()
 
-        self.exchange = NobitexExchange()
+    def get_ticker(self, symbol: str):
+        return self.repository.get_ticker(symbol)
 
-    def btc(self):
-
-        return self.exchange.get_ticker("btc")
+    def get_markets(self):
+        return self.repository.get_markets()

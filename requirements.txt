@@ -7,9 +7,6 @@ loguru
 SQLAlchemy
 python-dotenv
 apscheduler
-requests
-pandas
-numpy
 websocket-client
 SQLAlchemy
 python-dotenv
