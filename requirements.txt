@@ -1,0 +1,9 @@
+requests
+pandas
+numpy
+pandas-ta
+PySide6
+loguru
+SQLAlchemy
+python-dotenv
+apscheduler
