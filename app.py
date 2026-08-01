@@ -43,29 +43,42 @@ from services.history_service import HistoryService
 
 history = HistoryService()
 
-data = history.get_history()
+analysis = AnalysisService()
+
+result = analysis.run()
 
 print()
-print("=" * 60)
-print("History Download")
-print("=" * 60)
+print("=" * 50)
+print("BTC ANALYSIS")
+print("=" * 50)
 
-print(data.keys())
+print(f"Price : {result['price']:.2f}")
+print(f"EMA20 : {result['ema20']:.2f}")
+print(f"EMA50 : {result['ema50']:.2f}")
 
-print("Candles :", len(data["t"]))
-
+import pandas as pd
 from indicators.ema import EMAIndicator
 
-close_prices = data["c"]
+df = pd.DataFrame({
+    "time": data["t"],
+    "open": data["o"],
+    "high": data["h"],
+    "low": data["l"],
+    "close": data["c"],
+    "volume": data["v"]
+})
 
-ema20 = EMAIndicator.calculate(close_prices, 20)
-ema50 = EMAIndicator.calculate(close_prices, 50)
+print(df.tail())
+print(data["c"][-5:])
+
+ema20 = EMAIndicator(20).calculate(df)
+ema50 = EMAIndicator(50).calculate(df)
 
 print()
 print("=" * 50)
 print("EMA")
 print("=" * 50)
 
-print("Last Close :", close_prices[-1])
-print("EMA20      :", round(ema20.iloc[-1], 2))
-print("EMA50      :", round(ema50.iloc[-1], 2))
+print("Last Close :", df["close"].iloc[-1])
+print("EMA20      :", round(float(ema20.iloc[-1]), 2))
+print("EMA50      :", round(float(ema50.iloc[-1]), 2))
