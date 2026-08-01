@@ -1,84 +1,79 @@
 from config import APP_NAME, VERSION
 
-from core.logger import get_logger
 from core.database import initialize
+from core.logger import get_logger
+
 from services.market_service import MarketService
+from services.analysis_service import AnalysisService
 
 logger = get_logger()
 
-print("=" * 55)
-print(APP_NAME)
-print(f"Version : {VERSION}")
-print("=" * 55)
 
-logger.info("Program Started")
+def print_header():
+    print("=" * 55)
+    print(APP_NAME)
+    print(f"Version : {VERSION}")
+    print("=" * 55)
 
-initialize()
 
-logger.info("Database Ready")
+def main():
 
-print("✓ Logger Ready")
-print("✓ Database Ready")
-print()
+    print_header()
 
-print("Connecting to Nobitex...")
+    logger.info("Program Started")
 
-service = MarketService()
+    initialize()
 
-btc = service.get_ticker("btc")
+    logger.info("Database Ready")
 
-print()
-print("=" * 50)
-print("BTC Market")
-print("=" * 50)
-print(f"Price : {btc.last_price}")
-print(f"High  : {btc.high}")
-print(f"Low   : {btc.low}")
-print(f"Volume: {btc.volume}")
+    print("✓ Logger Ready")
+    print("✓ Database Ready")
+    print()
 
-print()
-print("Scanner Ready")
+    print("Connecting to Nobitex...")
 
-from services.history_service import HistoryService
+    market = MarketService()
 
-history = HistoryService()
+    btc = market.get_ticker("btc")
 
-analysis = AnalysisService()
+    print()
+    print("=" * 50)
+    print("BTC Market")
+    print("=" * 50)
+    print(f"Price : {btc.last_price}")
+    print(f"High  : {btc.high}")
+    print(f"Low   : {btc.low}")
+    print(f"Volume: {btc.volume}")
 
-result = analysis.run()
+    print()
+    print("Scanner Ready")
 
-print()
-print("=" * 50)
-print("BTC ANALYSIS")
-print("=" * 50)
+    analysis = AnalysisService()
 
-print(f"Price : {result['price']:.2f}")
-print(f"EMA20 : {result['ema20']:.2f}")
-print(f"EMA50 : {result['ema50']:.2f}")
+    result = analysis.run(
+        symbol="BTCIRT",
+        resolution="60",
+        bars=200,
+    )
 
-import pandas as pd
-from indicators.ema import EMAIndicator
+    print()
+    print("=" * 50)
+    print("BTC ANALYSIS")
+    print("=" * 50)
 
-df = pd.DataFrame({
-    "time": data["t"],
-    "open": data["o"],
-    "high": data["h"],
-    "low": data["l"],
-    "close": data["c"],
-    "volume": data["v"]
-})
+    print(f"Symbol : {result.symbol}")
+    print(f"Price  : {result.price:.2f}")
+    print(f"EMA20  : {result.ema20:.2f}")
+    print(f"EMA50  : {result.ema50:.2f}")
+    print(f"RSI    : {result.rsi:.2f}")
+    print(f"MACD   : {result.macd:.2f}")
+    print(f"Trend  : {result.trend}")
+    print(f"Signal : {result.signal}")
+    print(f"Score  : {result.score}")
 
-print(df.tail())
-print(data["c"][-5:])
+    print()
+    print("Analysis Completed")
 
-ema20 = EMAIndicator(20).calculate(df)
-ema50 = EMAIndicator(50).calculate(df)
 
-print()
-print("=" * 50)
-print("EMA")
-print("=" * 50)
-
-print("Last Close :", df["close"].iloc[-1])
-print("EMA20      :", round(float(ema20.iloc[-1]), 2))
-print("EMA50      :", round(float(ema50.iloc[-1]), 2))
+if __name__ == "__main__":
+    main()

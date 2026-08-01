@@ -1,8 +1,11 @@
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(slots=True)
 class AnalysisResult:
+    """
+    Final result of market analysis.
+    """
 
     symbol: str
 
@@ -12,10 +15,12 @@ class AnalysisResult:
 
     ema50: float
 
-    rsi: float
+    rsi: float = 0.0
 
-    macd: float
+    macd: float = 0.0
 
-    signal: str
+    trend: str = "NEUTRAL"
 
-    score: int
+    signal: str = "HOLD"
+
+    score: int = 0

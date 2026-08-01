@@ -1,12 +1,14 @@
 import pandas as pd
 
-from services.history_service import HistoryService
 from indicators.indicator_engine import IndicatorEngine
+from services.history_service import HistoryService
+from models.analysis_result import AnalysisResult
 
 
 class AnalysisService:
 
     def __init__(self):
+
         self.history_service = HistoryService()
         self.engine = IndicatorEngine()
 
@@ -15,7 +17,7 @@ class AnalysisService:
         symbol: str = "BTCIRT",
         resolution: str = "60",
         bars: int = 200,
-    ):
+    ) -> AnalysisResult:
 
         data = self.history_service.get_history(
             symbol=symbol,
@@ -23,15 +25,18 @@ class AnalysisService:
             bars=bars,
         )
 
-        df = pd.DataFrame({
-            "time": data["t"],
-            "open": data["o"],
-            "high": data["h"],
-            "low": data["l"],
-            "close": data["c"],
-            "volume": data["v"],
-        })
+        df = pd.DataFrame(
+            {
+                "time": data["t"],
+                "open": data["o"],
+                "high": data["h"],
+                "low": data["l"],
+                "close": data["c"],
+                "volume": data["v"],
+            }
+        )
 
-        result = self.engine.calculate(df)
-
-        return result
+        return self.engine.calculate(
+            df=df,
+            symbol=symbol,
+        )
