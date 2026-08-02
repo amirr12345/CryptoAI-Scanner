@@ -2,6 +2,8 @@ import pandas as pd
 
 from indicators.indicator_engine import IndicatorEngine
 from services.history_service import HistoryService
+from signals.signal_engine import SignalEngine
+
 from models.analysis_result import AnalysisResult
 
 
@@ -10,7 +12,8 @@ class AnalysisService:
     def __init__(self):
 
         self.history_service = HistoryService()
-        self.engine = IndicatorEngine()
+        self.indicator_engine = IndicatorEngine()
+        self.signal_engine = SignalEngine()
 
     def run(
         self,
@@ -36,7 +39,13 @@ class AnalysisService:
             }
         )
 
-        return self.engine.calculate(
+        # Calculate Indicators
+        result = self.indicator_engine.calculate(
             df=df,
             symbol=symbol,
         )
+
+        # Generate Trading Signal
+        result = self.signal_engine.generate(result)
+
+        return result
