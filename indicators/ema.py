@@ -9,8 +9,4 @@ class EMAIndicator(BaseIndicator):
 
     def calculate(self, data: pd.DataFrame):
 
-        return (
-            data["close"]
-            .ewm(span=self.period, adjust=False)
-            .mean()
-        )
+        return data["close"].ewm(span=self.period, adjust=False).mean()

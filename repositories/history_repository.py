@@ -7,13 +7,6 @@ class HistoryRepository:
 
         self.api = HistoryAPI()
 
-    def load(self,
-             symbol="BTCIRT",
-             resolution="60",
-             bars=200):
+    def load(self, symbol="BTCIRT", resolution="60", bars=200):
 
-        return self.api.get_history(
-            symbol,
-            resolution,
-            bars
-        )
+        return self.api.get_history(symbol, resolution, bars)

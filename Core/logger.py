@@ -8,8 +8,9 @@ logger.add(
     rotation="5 MB",
     retention="30 days",
     level="INFO",
-    encoding="utf-8"
+    encoding="utf-8",
 )
+
 
 def get_logger():
     return logger

@@ -24,3 +24,5 @@ class AnalysisResult:
     signal: str = "HOLD"
 
     score: int = 0
+
+    atr: float = 0.0

@@ -16,15 +16,9 @@ class RSIIndicator:
 
         loss = -delta.clip(upper=0)
 
-        avg_gain = gain.ewm(
-            alpha=1 / self.period,
-            adjust=False
-        ).mean()
+        avg_gain = gain.ewm(alpha=1 / self.period, adjust=False).mean()
 
-        avg_loss = loss.ewm(
-            alpha=1 / self.period,
-            adjust=False
-        ).mean()
+        avg_loss = loss.ewm(alpha=1 / self.period, adjust=False).mean()
 
         rs = avg_gain / avg_loss
 

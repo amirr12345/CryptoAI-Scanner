@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from api.models import Ticker
 
+
 class ExchangeBase(ABC):
 
     @abstractmethod

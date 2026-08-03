@@ -70,6 +70,7 @@ def main():
     print(f"Trend  : {result.trend}")
     print(f"Signal : {result.signal}")
     print(f"Score  : {result.score}")
+    print(f"ATR    : {result.atr:.2f}")
 
     print()
     print("Analysis Completed")

@@ -7,14 +7,6 @@ class HistoryService:
 
         self.repo = HistoryRepository()
 
-    def get_history(
-            self,
-            symbol="BTCIRT",
-            resolution="60",
-            bars=200):
+    def get_history(self, symbol="BTCIRT", resolution="60", bars=200):
 
-        return self.repo.load(
-            symbol,
-            resolution,
-            bars
-        )
+        return self.repo.load(symbol, resolution, bars)

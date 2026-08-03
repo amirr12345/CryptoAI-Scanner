@@ -1,33 +1,62 @@
 import sqlite3
-import os
+from pathlib import Path
 
-os.makedirs("data", exist_ok=True)
+DB_PATH = Path("data/crypto.db")
 
-DB_PATH = "data/crypto.db"
 
-def connect():
-    return sqlite3.connect(DB_PATH)
+class Database:
 
-def initialize():
+    def __init__(self):
+        DB_PATH.parent.mkdir(exist_ok=True)
 
-    conn = connect()
+        self.conn = sqlite3.connect(DB_PATH)
+        self.cursor = self.conn.cursor()
 
-    cur = conn.cursor()
+        self.create_tables()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS prices(
+    def create_tables(self):
+
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS candles(
 
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            symbol TEXT,
+            symbol TEXT NOT NULL,
 
-            price REAL,
+            timeframe TEXT NOT NULL,
 
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            timestamp TEXT NOT NULL,
 
+            open REAL,
+
+            high REAL,
+
+            low REAL,
+
+            close REAL,
+
+            volume REAL
         )
-    """)
+        """)
 
-    conn.commit()
+        self.conn.commit()
 
-    conn.close()
+    def execute(self, sql, params=()):
+        self.cursor.execute(sql, params)
+        self.conn.commit()
+
+    def fetchall(self, sql, params=()):
+        self.cursor.execute(sql, params)
+        return self.cursor.fetchall()
+
+    def close(self):
+        self.conn.close()
+
+
+db = Database()
+
+def initialize():
+    """
+    Initialize database singleton.
+    """
+    return db

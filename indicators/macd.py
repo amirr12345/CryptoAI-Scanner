@@ -17,27 +17,20 @@ class MACDIndicator:
 
         close = df["close"]
 
-        ema_fast = close.ewm(
-            span=self.fast,
-            adjust=False
-        ).mean()
+        ema_fast = close.ewm(span=self.fast, adjust=False).mean()
 
-        ema_slow = close.ewm(
-            span=self.slow,
-            adjust=False
-        ).mean()
+        ema_slow = close.ewm(span=self.slow, adjust=False).mean()
 
         macd = ema_fast - ema_slow
 
-        signal = macd.ewm(
-            span=self.signal,
-            adjust=False
-        ).mean()
+        signal = macd.ewm(span=self.signal, adjust=False).mean()
 
         histogram = macd - signal
 
-        return pd.DataFrame({
-            "macd": macd,
-            "signal": signal,
-            "histogram": histogram,
-        })
+        return pd.DataFrame(
+            {
+                "macd": macd,
+                "signal": signal,
+                "histogram": histogram,
+            }
+        )

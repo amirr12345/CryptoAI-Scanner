@@ -6,12 +6,7 @@ class HistoryAPI:
 
     BASE_URL = "https://apiv2.nobitex.ir/market/udf/history"
 
-    def get_history(
-        self,
-        symbol="BTCIRT",
-        resolution="60",
-        bars=200
-    ):
+    def get_history(self, symbol="BTCIRT", resolution="60", bars=200):
 
         now = int(time.time())
 
@@ -19,14 +14,10 @@ class HistoryAPI:
             "symbol": symbol,
             "resolution": resolution,
             "to": now,
-            "countback": bars
+            "countback": bars,
         }
 
-        response = requests.get(
-            self.BASE_URL,
-            params=params,
-            timeout=20
-        )
+        response = requests.get(self.BASE_URL, params=params, timeout=20)
 
         response.raise_for_status()
 
