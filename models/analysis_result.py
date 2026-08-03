@@ -26,3 +26,11 @@ class AnalysisResult:
     score: int = 0
 
     atr: float = 0.0
+
+    bb_upper: float = 0.0
+
+    bb_middle: float = 0.0
+
+    bb_lower: float = 0.0
+    
+    bb_width: float = 0.0

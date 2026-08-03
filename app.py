@@ -71,6 +71,10 @@ def main():
     print(f"Signal : {result.signal}")
     print(f"Score  : {result.score}")
     print(f"ATR    : {result.atr:.2f}")
+    print(f"BB Upper : {result.bb_upper:.2f}")
+    print(f"BB Mid   : {result.bb_middle:.2f}")
+    print(f"BB Lower : {result.bb_lower:.2f}")
+    print(f"BB Width : {result.bb_width:.4f}")
 
     print()
     print("Analysis Completed")
