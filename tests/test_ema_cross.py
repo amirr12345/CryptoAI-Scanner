@@ -8,10 +8,12 @@ from signals.detectors.ema_cross import (
 
 def test_golden_cross():
 
-    df = pd.DataFrame({
-        "ema20": [10, 15],
-        "ema50": [12, 14],
-    })
+    df = pd.DataFrame(
+        {
+            "ema20": [10, 15],
+            "ema50": [12, 14],
+        }
+    )
 
     detector = EMACrossDetector()
 
@@ -22,10 +24,12 @@ def test_golden_cross():
 
 def test_death_cross():
 
-    df = pd.DataFrame({
-        "ema20": [15, 10],
-        "ema50": [14, 12],
-    })
+    df = pd.DataFrame(
+        {
+            "ema20": [15, 10],
+            "ema50": [14, 12],
+        }
+    )
 
     detector = EMACrossDetector()
 
@@ -36,10 +40,12 @@ def test_death_cross():
 
 def test_no_cross():
 
-    df = pd.DataFrame({
-        "ema20": [15, 16],
-        "ema50": [10, 11],
-    })
+    df = pd.DataFrame(
+        {
+            "ema20": [15, 16],
+            "ema50": [10, 11],
+        }
+    )
 
     detector = EMACrossDetector()
 

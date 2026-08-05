@@ -5,8 +5,10 @@ os.makedirs("data", exist_ok=True)
 
 DB_PATH = "data/crypto.db"
 
+
 def connect():
     return sqlite3.connect(DB_PATH)
+
 
 def initialize():
 
