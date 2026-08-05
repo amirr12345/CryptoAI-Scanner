@@ -1,9 +1,6 @@
 import pandas as pd
 
-from signals.detectors.macd_cross import (
-    MACDCrossDetector,
-    MACDCrossType,
-)
+from signals.detectors.macd_cross import MACDCrossDetector
 
 
 def test_bullish_cross():
@@ -19,7 +16,9 @@ def test_bullish_cross():
 
     result = detector.detect(df)
 
-    assert result == MACDCrossType.BULLISH_CROSS
+    assert result.detector == "MACD"
+    assert result.signal == "BULLISH_CROSS"
+    assert result.score == 20
 
 
 def test_bearish_cross():
@@ -35,7 +34,9 @@ def test_bearish_cross():
 
     result = detector.detect(df)
 
-    assert result == MACDCrossType.BEARISH_CROSS
+    assert result.detector == "MACD"
+    assert result.signal == "BEARISH_CROSS"
+    assert result.score == -20
 
 
 def test_no_cross():
@@ -51,4 +52,6 @@ def test_no_cross():
 
     result = detector.detect(df)
 
-    assert result == MACDCrossType.NO_CROSS
+    assert result.detector == "MACD"
+    assert result.signal == "NO_CROSS"
+    assert result.score == 0

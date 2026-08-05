@@ -1,14 +1,7 @@
-from enum import Enum
-
 import pandas as pd
 
+from models.detector_result import DetectorResult
 from signals.detectors.base_detector import BaseDetector
-
-
-class MACDCrossType(Enum):
-    BULLISH_CROSS = "BULLISH_CROSS"
-    BEARISH_CROSS = "BEARISH_CROSS"
-    NO_CROSS = "NO_CROSS"
 
 
 class MACDCrossDetector(BaseDetector):
@@ -16,10 +9,16 @@ class MACDCrossDetector(BaseDetector):
     Detect MACD signal line crossovers.
     """
 
-    def detect(self, df: pd.DataFrame) -> MACDCrossType:
+    def detect(self, df: pd.DataFrame) -> DetectorResult:
 
         if len(df) < 2:
-            return MACDCrossType.NO_CROSS
+            return DetectorResult(
+                detector="MACD",
+                signal="NO_CROSS",
+                score=0,
+                confidence=0.0,
+                description="Not enough data.",
+            )
 
         macd = df["macd"]
         signal = df["signal"]
@@ -30,10 +29,31 @@ class MACDCrossDetector(BaseDetector):
         current_macd = macd.iloc[-1]
         current_signal = signal.iloc[-1]
 
+        # Bullish Cross
         if previous_macd < previous_signal and current_macd > current_signal:
-            return MACDCrossType.BULLISH_CROSS
+            return DetectorResult(
+                detector="MACD",
+                signal="BULLISH_CROSS",
+                score=20,
+                confidence=0.90,
+                description="MACD crossed above Signal line.",
+            )
 
+        # Bearish Cross
         if previous_macd > previous_signal and current_macd < current_signal:
-            return MACDCrossType.BEARISH_CROSS
+            return DetectorResult(
+                detector="MACD",
+                signal="BEARISH_CROSS",
+                score=-20,
+                confidence=0.90,
+                description="MACD crossed below Signal line.",
+            )
 
-        return MACDCrossType.NO_CROSS
+        # No Cross
+        return DetectorResult(
+            detector="MACD",
+            signal="NO_CROSS",
+            score=0,
+            confidence=0.0,
+            description="No MACD crossover detected.",
+        )
