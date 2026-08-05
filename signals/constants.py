@@ -40,3 +40,23 @@ MACD_BEARISH_SCORE = -20
 
 BOLLINGER_BREAKOUT_SCORE = 15
 VOLUME_CONFIRMATION_SCORE = 10
+
+# ==========================
+# Volume Signals
+# ==========================
+
+HIGH_VOLUME = "HIGH_VOLUME"
+LOW_VOLUME = "LOW_VOLUME"
+
+VOLUME_HIGH_SCORE = 10
+VOLUME_LOW_SCORE = -5
+
+# ==========================
+# Volume Signals
+# ==========================
+
+HIGH_VOLUME = "HIGH_VOLUME"
+LOW_VOLUME = "LOW_VOLUME"
+
+VOLUME_HIGH_SCORE = 10
+VOLUME_LOW_SCORE = -5
