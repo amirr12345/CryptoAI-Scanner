@@ -1,9 +1,6 @@
 import pandas as pd
 
-from signals.detectors.ema_cross import (
-    EMACrossDetector,
-    EMACrossType,
-)
+from signals.detectors.ema_cross import EMACrossDetector
 
 
 def test_golden_cross():
@@ -19,7 +16,9 @@ def test_golden_cross():
 
     result = detector.detect(df)
 
-    assert result == EMACrossType.GOLDEN_CROSS
+    assert result.detector == "EMA"
+    assert result.signal == "GOLDEN_CROSS"
+    assert result.score == 25
 
 
 def test_death_cross():
@@ -35,7 +34,9 @@ def test_death_cross():
 
     result = detector.detect(df)
 
-    assert result == EMACrossType.DEATH_CROSS
+    assert result.detector == "EMA"
+    assert result.signal == "DEATH_CROSS"
+    assert result.score == -25
 
 
 def test_no_cross():
@@ -51,4 +52,6 @@ def test_no_cross():
 
     result = detector.detect(df)
 
-    assert result == EMACrossType.NO_CROSS
+    assert result.detector == "EMA"
+    assert result.signal == "NO_CROSS"
+    assert result.score == 0
