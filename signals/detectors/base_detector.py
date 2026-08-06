@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
+
 import pandas as pd
+
+from models.detector_result import DetectorResult
 
 
 class BaseDetector(ABC):
@@ -8,6 +11,8 @@ class BaseDetector(ABC):
     """
 
     @abstractmethod
-    def detect(self, df: pd.DataFrame):
-        """Detect trading signal."""
+    def detect(self, df: pd.DataFrame) -> DetectorResult:
+        """
+        Execute detector and return DetectorResult.
+        """
         raise NotImplementedError
