@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 
 from models.detector_result import DetectorResult
@@ -11,23 +13,20 @@ class EMACrossDetector(BaseDetector):
 
     def detect(self, df: pd.DataFrame) -> DetectorResult:
 
-        ema20 = df["ema20"]
-        ema50 = df["ema50"]
-
         if len(df) < 2:
             return DetectorResult(
                 detector="EMA",
                 signal="NO_CROSS",
                 score=0,
                 confidence=0.0,
-                description="Not enough data.",
+                description="Not enough candles.",
             )
 
-        previous20 = ema20.iloc[-2]
-        previous50 = ema50.iloc[-2]
+        previous20 = df["ema20"].iloc[-2]
+        previous50 = df["ema50"].iloc[-2]
 
-        current20 = ema20.iloc[-1]
-        current50 = ema50.iloc[-1]
+        current20 = df["ema20"].iloc[-1]
+        current50 = df["ema50"].iloc[-1]
 
         # Golden Cross
         if previous20 < previous50 and current20 > current50:
@@ -35,7 +34,7 @@ class EMACrossDetector(BaseDetector):
                 detector="EMA",
                 signal="GOLDEN_CROSS",
                 score=25,
-                confidence=0.90,
+                confidence=0.95,
                 description="EMA20 crossed above EMA50.",
             )
 
@@ -45,7 +44,7 @@ class EMACrossDetector(BaseDetector):
                 detector="EMA",
                 signal="DEATH_CROSS",
                 score=-25,
-                confidence=0.90,
+                confidence=0.95,
                 description="EMA20 crossed below EMA50.",
             )
 
