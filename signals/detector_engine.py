@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from typing import Iterable
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -10,11 +8,10 @@ from signals.detectors.base_detector import BaseDetector
 
 class DetectorEngine:
     """
-    Executes all registered detectors and returns
-    a list of DetectorResult objects.
+    Executes registered detectors and collects their results.
     """
 
-    def __init__(self, detectors: Iterable[BaseDetector]):
+    def __init__(self, detectors: Sequence[BaseDetector]):
         self.detectors = list(detectors)
 
     def run(self, df: pd.DataFrame) -> list[DetectorResult]:
@@ -23,7 +20,12 @@ class DetectorEngine:
         for detector in self.detectors:
             result = detector.detect(df)
 
-            if result is not None:
-                results.append(result)
+            if not isinstance(result, DetectorResult):
+                raise TypeError(
+                    f"{detector.__class__.__name__}.detect() "
+                    "must return DetectorResult"
+                )
+
+            results.append(result)
 
         return results

@@ -60,8 +60,8 @@ class VolumeConfirmationDetector(BaseDetector):
                 detector="VOLUME",
                 signal="WEAK_CONFIRMATION",
                 score=max(
-                    1,
-                    DetectorConfig.VOLUME_WEIGHT // 2,
+                 1,
+                (DetectorConfig.VOLUME_WEIGHT + 1) // 2,
                 ),
                 confidence=0.75,
                 description="Trading volume is slightly above average.",
