@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *.class
+.pytest_cache/
+.ruff_cache/
+logs/
 
 # Virtual environments
 .venv/
@@ -10,6 +13,7 @@ env/
 
 # Pytest
 .pytest_cache/
+.ruff_cache/
 
 # IDE
 .vscode/
@@ -17,6 +21,7 @@ env/
 
 # Logs
 *.log
+logs/
 
 # Environment files
 .env
