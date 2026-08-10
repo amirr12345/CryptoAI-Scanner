@@ -1,6 +1,16 @@
+from __future__ import annotations
+
 import pandas as pd
 
 from models.detector_result import DetectorResult
+from signals.constants import (
+    BEARISH_CROSS,
+    BULLISH_CROSS,
+    MACD,
+    MACD_BEARISH_SCORE,
+    MACD_BULLISH_SCORE,
+    NO_CROSS,
+)
 from signals.detectors.base_detector import BaseDetector
 
 
@@ -13,28 +23,33 @@ class MACDCrossDetector(BaseDetector):
 
         if len(df) < 2:
             return DetectorResult(
-                detector="MACD",
-                signal="NO_CROSS",
+                detector=MACD,
+                signal=NO_CROSS,
                 score=0,
                 confidence=0.0,
                 description="Not enough data.",
             )
 
-        macd = df["macd"]
-        signal = df["signal"]
+        required_columns = {"macd", "signal"}
+        missing = required_columns - set(df.columns)
 
-        previous_macd = macd.iloc[-2]
-        previous_signal = signal.iloc[-2]
+        if missing:
+            raise ValueError(
+                f"Missing required columns: {', '.join(sorted(missing))}"
+            )
 
-        current_macd = macd.iloc[-1]
-        current_signal = signal.iloc[-1]
+        previous_macd = df["macd"].iloc[-2]
+        previous_signal = df["signal"].iloc[-2]
+
+        current_macd = df["macd"].iloc[-1]
+        current_signal = df["signal"].iloc[-1]
 
         # Bullish Cross
         if previous_macd < previous_signal and current_macd > current_signal:
             return DetectorResult(
-                detector="MACD",
-                signal="BULLISH_CROSS",
-                score=20,
+                detector=MACD,
+                signal=BULLISH_CROSS,
+                score=MACD_BULLISH_SCORE,
                 confidence=0.90,
                 description="MACD crossed above Signal line.",
             )
@@ -42,17 +57,16 @@ class MACDCrossDetector(BaseDetector):
         # Bearish Cross
         if previous_macd > previous_signal and current_macd < current_signal:
             return DetectorResult(
-                detector="MACD",
-                signal="BEARISH_CROSS",
-                score=-20,
+                detector=MACD,
+                signal=BEARISH_CROSS,
+                score=MACD_BEARISH_SCORE,
                 confidence=0.90,
                 description="MACD crossed below Signal line.",
             )
 
-        # No Cross
         return DetectorResult(
-            detector="MACD",
-            signal="NO_CROSS",
+            detector=MACD,
+            signal=NO_CROSS,
             score=0,
             confidence=0.0,
             description="No MACD crossover detected.",

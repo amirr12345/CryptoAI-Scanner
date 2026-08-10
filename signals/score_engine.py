@@ -12,20 +12,20 @@ class ScoreEngine:
         results: list[DetectorResult],
     ) -> ScoreResult:
 
-        total_score = sum(r.score for r in results)
+        total_score = sum(result.score for result in results)
 
         detector_count = len(results)
 
         reasons = [
-            f"{r.detector}: {r.signal}"
-            for r in results
+            f"{result.detector}: {result.signal}"
+            for result in results
         ]
 
         confidence = 0.0
 
         if detector_count > 0:
             confidence = (
-                sum(r.confidence for r in results)
+                sum(result.confidence for result in results)
                 / detector_count
             )
 

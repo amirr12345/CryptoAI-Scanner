@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 
@@ -8,7 +6,8 @@ class DetectorConfig:
     """
     Global detector configuration.
 
-    All detector weights and thresholds are centralized here.
+    All detector weights, thresholds and signal
+    classification limits are centralized here.
     """
 
     # -----------------------------
@@ -38,8 +37,8 @@ class DetectorConfig:
     # Score Thresholds
     # -----------------------------
 
-    STRONG_BUY_SCORE: int = 60
-    BUY_SCORE: int = 30
+    STRONG_BUY_SCORE: int = 40
+    BUY_SCORE: int = 20
 
-    STRONG_SELL_SCORE: int = -60
-    SELL_SCORE: int = -30
+    STRONG_SELL_SCORE: int = -40
+    SELL_SCORE: int = -20

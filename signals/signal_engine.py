@@ -1,5 +1,6 @@
 from models.score_result import ScoreResult
 from models.signal_result import SignalResult
+from signals.detector_config import DetectorConfig
 
 
 class SignalEngine:
@@ -11,16 +12,16 @@ class SignalEngine:
 
         total = score.total_score
 
-        if total >= 40:
+        if total >= DetectorConfig.STRONG_BUY_SCORE:
             signal = "STRONG_BUY"
 
-        elif total >= 20:
+        elif total >= DetectorConfig.BUY_SCORE:
             signal = "BUY"
 
-        elif total <= -40:
+        elif total <= DetectorConfig.STRONG_SELL_SCORE:
             signal = "STRONG_SELL"
 
-        elif total <= -20:
+        elif total <= DetectorConfig.SELL_SCORE:
             signal = "SELL"
 
         else:
