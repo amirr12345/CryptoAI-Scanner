@@ -12,11 +12,8 @@ class NobitexExchange(ExchangeBase):
 
         response = requests.get(
             self.BASE_URL + "/market/stats",
-            params={
-                "srcCurrency": symbol,
-                "dstCurrency": "rls"
-            },
-            timeout=10
+            params={"srcCurrency": symbol, "dstCurrency": "rls"},
+            timeout=10,
         )
 
         response.raise_for_status()
@@ -30,15 +27,12 @@ class NobitexExchange(ExchangeBase):
             last_price=float(market["latest"]),
             high=float(market["dayHigh"]),
             low=float(market["dayLow"]),
-            volume=float(market["volumeSrc"])
+            volume=float(market["volumeSrc"]),
         )
 
     def get_markets(self):
 
-        response = requests.get(
-            self.BASE_URL + "/market/stats",
-            timeout=10
-        )
+        response = requests.get(self.BASE_URL + "/market/stats", timeout=10)
 
         response.raise_for_status()
 
