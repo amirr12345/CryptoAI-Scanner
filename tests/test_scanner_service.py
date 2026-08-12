@@ -21,6 +21,9 @@ class FakeMarketService:
     def __init__(self):
         self.exchange = FakeExchange()
 
+    def markets(self):
+        return self.exchange.get_markets()
+
 
 class FakeAnalysisService:
 

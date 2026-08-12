@@ -32,7 +32,6 @@ class ScannerService:
         Example:
             btc-rls -> BTC
         """
-
         stats = data.get("stats", {})
 
         symbols: list[str] = []
@@ -62,7 +61,7 @@ class ScannerService:
         A failure in one symbol does not stop the scan.
         """
 
-        market_data = self.market_service.exchange.get_markets()
+        market_data = self.market_service.markets()
 
         if symbols is None:
             target_symbols = self._extract_rls_symbols(market_data)

@@ -18,6 +18,12 @@ class MarketService:
         """
         return self.exchange.get_ticker("btc")
 
+    def markets(self) -> dict:
+        """
+        Return available market statistics.
+        """
+        return self.exchange.get_markets()
+
     def history(
         self,
         symbol: str,
@@ -27,7 +33,6 @@ class MarketService:
         """
         Return OHLCV candles for a market.
         """
-
         return self.exchange.get_history(
             symbol=symbol,
             resolution=resolution,
