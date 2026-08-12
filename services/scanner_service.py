@@ -15,7 +15,9 @@ class ScannerService:
         market_service: MarketService | None = None,
         analysis_service: AnalysisService | None = None,
     ):
-        self.market_service = market_service or MarketService()
+        self.market_service = (
+            market_service or MarketService()
+        )
 
         self.analysis_service = (
             analysis_service
@@ -25,13 +27,16 @@ class ScannerService:
         )
 
     @staticmethod
-    def _extract_rls_symbols(data: dict) -> list[str]:
+    def _extract_rls_symbols(
+        data: dict,
+    ) -> list[str]:
         """
         Extract source symbols from Nobitex RLS market keys.
 
         Example:
             btc-rls -> BTC
         """
+
         stats = data.get("stats", {})
 
         symbols: list[str] = []
@@ -43,7 +48,9 @@ class ScannerService:
             symbol = market_key[:-4].strip()
 
             if symbol:
-                symbols.append(symbol.upper())
+                symbols.append(
+                    symbol.upper()
+                )
 
         return sorted(set(symbols))
 
@@ -64,15 +71,20 @@ class ScannerService:
         market_data = self.market_service.markets()
 
         if symbols is None:
-            target_symbols = self._extract_rls_symbols(market_data)
+            target_symbols = (
+                self._extract_rls_symbols(
+                    market_data
+                )
+            )
         else:
             target_symbols = [
-                symbol.upper()
+                symbol.strip().upper()
                 for symbol in symbols
                 if symbol.strip()
             ]
 
         results = []
+
         failed_symbols: dict[str, str] = {}
 
         for symbol in target_symbols:
