@@ -65,3 +65,21 @@ def test_indicator_engine_handles_empty_dataframe():
 
     assert result.empty
     assert list(result.columns) == list(df.columns)
+def test_indicator_engine_includes_vwap():
+    data = pd.DataFrame(
+        {
+            "timestamp": [1, 2, 3],
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [95.0, 96.0, 97.0],
+            "close": [102.0, 104.0, 106.0],
+            "volume": [100.0, 200.0, 300.0],
+        }
+    )
+
+    engine = IndicatorEngine()
+
+    result = engine.calculate(data)
+
+    assert "vwap" in result.columns
+    assert result["vwap"].notna().any()
