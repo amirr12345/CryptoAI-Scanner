@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from models.cvd_result import CVDPoint, CVDResult
+from models.cvd_result import (
+    CVDPoint,
+    CVDResult,
+    SwingDivergence,
+    SwingPoint,
+)
 from models.trade import Trade
 
 
@@ -19,9 +24,10 @@ class CVDEngine:
         self,
         trades: list[Trade],
         starting_cvd: float = 0.0,
+        swing_window: int = 2,
     ) -> CVDResult:
         """
-        Calculate CVD metrics from executed trades.
+        Calculate CVD metrics and swing-based divergence.
 
         Parameters
         ----------
@@ -30,13 +36,20 @@ class CVDEngine:
 
         starting_cvd:
             Existing cumulative delta before this batch.
-            May be positive, zero, or negative.
+
+        swing_window:
+            Number of points on each side used to confirm a swing.
 
         Returns
         -------
         CVDResult
             Aggregated CVD analysis.
         """
+
+        if swing_window < 1:
+            raise ValueError(
+                "Swing window must be greater than zero."
+            )
 
         if not trades:
             return CVDResult(
@@ -50,6 +63,8 @@ class CVDEngine:
                 trend="NEUTRAL",
                 divergence="NONE",
                 points=[],
+                swing_points=[],
+                swing_divergences=[],
             )
 
         buy_volume = 0.0
@@ -99,9 +114,20 @@ class CVDEngine:
             cvd_change=cvd_change,
         )
 
-        divergence = self._detect_divergence(
+        basic_divergence = self._detect_divergence(
             price_change=price_change,
             cvd_change=cvd_change,
+        )
+
+        swing_points = self._detect_swing_points(
+            points=points,
+            window=swing_window,
+        )
+
+        swing_divergences = (
+            self._detect_swing_divergences(
+                swing_points=swing_points,
+            )
         )
 
         return CVDResult(
@@ -134,8 +160,10 @@ class CVDEngine:
                 8,
             ),
             trend=trend,
-            divergence=divergence,
+            divergence=basic_divergence,
             points=points,
+            swing_points=swing_points,
+            swing_divergences=swing_divergences,
         )
 
     @staticmethod
@@ -145,15 +173,6 @@ class CVDEngine:
     ) -> str:
         """
         Detect directional market-flow agreement.
-
-        BULLISH:
-            Price rising and CVD rising.
-
-        BEARISH:
-            Price falling and CVD falling.
-
-        NEUTRAL:
-            Mixed or unchanged conditions.
         """
 
         if (
@@ -177,15 +196,6 @@ class CVDEngine:
     ) -> str:
         """
         Detect basic price/CVD divergence.
-
-        BULLISH_DIVERGENCE:
-            Price falling while CVD rises.
-
-        BEARISH_DIVERGENCE:
-            Price rising while CVD falls.
-
-        NONE:
-            No divergence.
         """
 
         if (
@@ -201,3 +211,152 @@ class CVDEngine:
             return "BEARISH_DIVERGENCE"
 
         return "NONE"
+
+    @staticmethod
+    def _detect_swing_points(
+        points: list[CVDPoint],
+        window: int,
+    ) -> list[SwingPoint]:
+        """
+        Detect local price swing highs/lows.
+
+        A point is a HIGH when its price is greater than every
+        price inside the surrounding window.
+
+        A point is a LOW when its price is lower than every
+        price inside the surrounding window.
+
+        The same point can only be classified as one type.
+        """
+
+        if len(points) < (window * 2 + 1):
+            return []
+
+        swings: list[SwingPoint] = []
+
+        for index in range(
+            window,
+            len(points) - window,
+        ):
+            current = points[index]
+
+            left = points[
+                index - window:index
+            ]
+
+            right = points[
+                index + 1:index + window + 1
+            ]
+
+            surrounding = left + right
+
+            is_high = all(
+                current.price > point.price
+                for point in surrounding
+            )
+
+            is_low = all(
+                current.price < point.price
+                for point in surrounding
+            )
+
+            if is_high:
+                swings.append(
+                    SwingPoint(
+                        index=index,
+                        timestamp=current.timestamp,
+                        price=current.price,
+                        cumulative_delta=current.cumulative_delta,
+                        kind="HIGH",
+                    )
+                )
+
+            elif is_low:
+                swings.append(
+                    SwingPoint(
+                        index=index,
+                        timestamp=current.timestamp,
+                        price=current.price,
+                        cumulative_delta=current.cumulative_delta,
+                        kind="LOW",
+                    )
+                )
+
+        return swings
+
+    @staticmethod
+    def _detect_swing_divergences(
+        swing_points: list[SwingPoint],
+    ) -> list[SwingDivergence]:
+        """
+        Detect divergence between consecutive swings of the
+        same type.
+
+        LOW + lower price + higher CVD:
+            BULLISH_DIVERGENCE
+
+        HIGH + higher price + lower CVD:
+            BEARISH_DIVERGENCE
+        """
+
+        divergences: list[SwingDivergence] = []
+
+        previous_by_kind: dict[
+            str,
+            SwingPoint,
+        ] = {}
+
+        for current in swing_points:
+            previous = previous_by_kind.get(
+                current.kind
+            )
+
+            if previous is not None:
+                price_change = (
+                    current.price
+                    - previous.price
+                )
+
+                cvd_change = (
+                    current.cumulative_delta
+                    - previous.cumulative_delta
+                )
+
+                signal = "NONE"
+
+                if (
+                    current.kind == "LOW"
+                    and price_change < 0
+                    and cvd_change > 0
+                ):
+                    signal = "BULLISH_DIVERGENCE"
+
+                elif (
+                    current.kind == "HIGH"
+                    and price_change > 0
+                    and cvd_change < 0
+                ):
+                    signal = "BEARISH_DIVERGENCE"
+
+                if signal != "NONE":
+                    divergences.append(
+                        SwingDivergence(
+                            signal=signal,
+                            price_change=round(
+                                price_change,
+                                8,
+                            ),
+                            cvd_change=round(
+                                cvd_change,
+                                8,
+                            ),
+                            previous_index=previous.index,
+                            current_index=current.index,
+                        )
+                    )
+
+            previous_by_kind[
+                current.kind
+            ] = current
+
+        return divergences
