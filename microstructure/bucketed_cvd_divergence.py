@@ -20,15 +20,6 @@ class BucketedCVDAnalyzer:
     ) -> BucketedCVDAnalysis:
         """
         Detect price swings and price/CVD divergences.
-
-        Parameters
-        ----------
-        buckets:
-            Time-bucketed CVD data.
-
-        swing_window:
-            Number of buckets required on each side
-            to confirm a swing.
         """
 
         if swing_window < 1:
@@ -71,12 +62,6 @@ class BucketedCVDAnalyzer:
     ) -> list[BucketSwingPoint]:
         """
         Detect local price swing highs and lows.
-
-        A bucket is a HIGH when its close price is greater
-        than the close prices of all surrounding buckets.
-
-        A bucket is a LOW when its close price is lower
-        than the surrounding buckets.
         """
 
         if len(buckets) < (window * 2 + 1):
@@ -141,14 +126,6 @@ class BucketedCVDAnalyzer:
         """
         Detect divergence between consecutive swings
         of the same type.
-
-        LOW:
-            Lower price + higher CVD
-            -> bullish divergence
-
-        HIGH:
-            Higher price + lower CVD
-            -> bearish divergence
         """
 
         divergences: list[BucketDivergence] = []
@@ -167,10 +144,12 @@ class BucketedCVDAnalyzer:
                 previous_by_kind[
                     current.kind
                 ] = current
+
                 continue
 
             price_change = (
-                current.price - previous.price
+                current.price
+                - previous.price
             )
 
             if previous.price == 0:
