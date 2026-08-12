@@ -63,3 +63,33 @@ class ScanResult:
             for result in self.ranked_results
             if result.signal != "HOLD"
         ]
+
+    def top_actionable(
+        self,
+        limit: int = 10,
+    ) -> list[AnalysisResult]:
+        """
+        Return the top N actionable trading signals.
+
+        Parameters
+        ----------
+        limit:
+            Maximum number of actionable signals to return.
+
+        Returns
+        -------
+        list[AnalysisResult]
+            Top actionable signals according to the current ranking.
+
+        Raises
+        ------
+        ValueError
+            If limit is less than or equal to zero.
+        """
+
+        if limit <= 0:
+            raise ValueError(
+                "Limit must be greater than zero."
+            )
+
+        return self.actionable_results[:limit]
