@@ -9,16 +9,51 @@ logger = get_logger()
 
 
 def print_scan_results(scan_result):
+    """
+    Print concise multi-market scanner results.
+
+    All successful analysis results remain available through
+    scan_result.results, but the main console output focuses
+    on actionable signals (score != 0).
+    """
+
     print()
     print("=" * 70)
-    print("MULTI-MARKET SCAN RESULTS")
+    print("MULTI-MARKET SCAN SUMMARY")
     print("=" * 70)
 
-    if not scan_result.results:
-        print("No successful market analysis.")
+    print(
+        f"Total Markets       : "
+        f"{scan_result.successful_count + scan_result.failed_count}"
+    )
+
+    print(
+        f"Successful Analyses : "
+        f"{scan_result.successful_count}"
+    )
+
+    print(
+        f"Actionable Signals  : "
+        f"{len(scan_result.actionable_results)}"
+    )
+
+    print(
+        f"Failed Markets      : "
+        f"{scan_result.failed_count}"
+    )
+
+    print("=" * 70)
+
+    actionable = scan_result.actionable_results
+
+    if not actionable:
+        print("No actionable signals found.")
     else:
+        print("TOP ACTIONABLE SIGNALS")
+        print("-" * 70)
+
         for rank, result in enumerate(
-            scan_result.ranked_results,
+            actionable,
             start=1,
         ):
             print(
@@ -30,12 +65,18 @@ def print_scan_results(scan_result):
                 f"Price={result.price:.2f}"
             )
 
-    print("-" * 70)
+    print("=" * 70)
 
     if scan_result.failed_symbols:
-        print("FAILED SYMBOLS")
-        for symbol, error in scan_result.failed_symbols.items():
-            print(f"{symbol}: {error}")
+        print("FAILED MARKETS")
+        print("-" * 70)
+
+        for symbol, error in (
+            scan_result.failed_symbols.items()
+        ):
+            print(
+                f"{symbol:<12}: {error}"
+            )
 
     print("=" * 70)
 
@@ -44,6 +85,7 @@ def main():
     logger.info("Program Started")
 
     initialize()
+
     logger.info("Database Ready")
 
     print("=" * 70)
