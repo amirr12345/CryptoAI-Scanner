@@ -3,6 +3,8 @@ from __future__ import annotations
 from api.base import MarketDataProvider
 from api.nobitex import NobitexExchange
 from models.candle import Candle
+from models.order_book import OrderBook
+from models.trade import Trade
 
 
 class MarketService:
@@ -80,4 +82,30 @@ class MarketService:
             symbol=symbol,
             resolution=resolution,
             countback=countback,
+        )
+
+    def trades(
+        self,
+        symbol: str,
+        limit: int = 100,
+    ) -> list[Trade]:
+        """
+        Return recent executed trades for a market.
+        """
+        return self.provider.get_trades(
+            symbol=symbol,
+            limit=limit,
+        )
+
+    def orderbook(
+        self,
+        symbol: str,
+        depth: int = 20,
+    ) -> OrderBook:
+        """
+        Return a Level 2 order book snapshot.
+        """
+        return self.provider.get_orderbook(
+            symbol=symbol,
+            depth=depth,
         )
