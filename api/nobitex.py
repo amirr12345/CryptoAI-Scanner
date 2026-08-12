@@ -4,14 +4,14 @@ import time
 
 import requests
 
-from api.base import ExchangeBase
+from api.base import MarketDataProvider
 from api.models import Ticker
 from models.candle import Candle
 
 
-class NobitexExchange(ExchangeBase):
+class NobitexExchange(MarketDataProvider):
     """
-    Nobitex exchange API client.
+    Nobitex market data provider.
     """
 
     BASE_URL = "https://apiv2.nobitex.ir"
@@ -19,16 +19,6 @@ class NobitexExchange(ExchangeBase):
     def get_ticker(self, symbol: str) -> Ticker:
         """
         Get current market ticker.
-
-        Parameters
-        ----------
-        symbol:
-            Source currency symbol, e.g. BTC, ETH.
-
-        Returns
-        -------
-        Ticker
-            Current market ticker information.
         """
 
         if not symbol:
@@ -60,7 +50,8 @@ class NobitexExchange(ExchangeBase):
             market = data["stats"][market_key]
         except KeyError as exc:
             raise ValueError(
-                f"Market not found in Nobitex response: {market_key}"
+                f"Market not found in Nobitex response: "
+                f"{market_key}"
             ) from exc
 
         return Ticker(
@@ -99,29 +90,16 @@ class NobitexExchange(ExchangeBase):
         countback: int = 200,
     ) -> list[Candle]:
         """
-        Get OHLCV historical candles from Nobitex UDF endpoint.
-
-        Parameters
-        ----------
-        symbol:
-            Market symbol. Examples:
-                BTC
-                BTCIRT
-                ETH
-                ETHIRT
-
-        resolution:
-            Candle resolution accepted by Nobitex UDF.
-
-        countback:
-            Number of historical candles requested.
+        Get OHLCV historical candles from Nobitex UDF.
         """
 
         if not symbol:
             raise ValueError("Symbol cannot be empty.")
 
         if not resolution:
-            raise ValueError("Resolution cannot be empty.")
+            raise ValueError(
+                "Resolution cannot be empty."
+            )
 
         if countback <= 0:
             raise ValueError(
@@ -130,14 +108,10 @@ class NobitexExchange(ExchangeBase):
 
         if countback > 500:
             raise ValueError(
-                "Countback cannot be greater than 500 per request."
+                "Countback cannot be greater than 500 "
+                "per request."
             )
 
-        # Normalize symbol for Nobitex UDF history.
-        #
-        # Scanner uses source symbols such as BTC / ETH / XRP,
-        # while UDF history expects the market symbol such as
-        # BTCIRT / ETHIRT / XRPIRT.
         normalized_symbol = symbol.strip().upper()
 
         if normalized_symbol.endswith("IRT"):
@@ -145,7 +119,6 @@ class NobitexExchange(ExchangeBase):
         else:
             udf_symbol = f"{normalized_symbol}IRT"
 
-        # UDF history requires an upper time boundary.
         to_timestamp = int(time.time())
 
         params = {
