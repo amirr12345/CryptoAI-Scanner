@@ -1,37 +1,80 @@
 from config import APP_NAME, VERSION
 
-from core.logger import get_logger
 from core.database import initialize
+from core.logger import get_logger
+from services.scanner_service import ScannerService
+
 
 logger = get_logger()
 
-from services.market_service import MarketService
 
-service = MarketService()
+def print_scan_results(scan_result):
+    print()
+    print("=" * 70)
+    print("MULTI-MARKET SCAN RESULTS")
+    print("=" * 70)
 
-btc = service.btc()
+    if not scan_result.results:
+        print("No successful market analysis.")
+    else:
+        for rank, result in enumerate(
+            scan_result.ranked_results,
+            start=1,
+        ):
+            print(
+                f"{rank}. "
+                f"{result.symbol:<10} "
+                f"Signal={result.signal:<12} "
+                f"Score={result.total_score:>4} "
+                f"Confidence={result.confidence:.2f} "
+                f"Price={result.price:.2f}"
+            )
 
-print()
-print("=" * 50)
-print("BTC Market")
-print("=" * 50)
+    print("-" * 70)
 
-print("Price :", btc.last_price)
-print("High  :", btc.high)
-print("Low   :", btc.low)
-print("Volume:", btc.volume)
+    if scan_result.failed_symbols:
+        print("FAILED SYMBOLS")
+        for symbol, error in scan_result.failed_symbols.items():
+            print(f"{symbol}: {error}")
 
-print("=" * 55)
-print(APP_NAME)
-print("Version :", VERSION)
-print("=" * 55)
+    print("=" * 70)
 
-logger.info("Program Started")
 
-initialize()
+def main():
+    logger.info("Program Started")
 
-logger.info("Database Ready")
+    initialize()
+    logger.info("Database Ready")
 
-print("✓ Logger Ready")
-print("✓ Database Ready")
-print("Scanner Starting...")
+    print("=" * 70)
+    print(APP_NAME)
+    print("Version :", VERSION)
+    print("=" * 70)
+
+    print("Logger Ready")
+    print("Database Ready")
+    print("Scanner Starting...")
+
+    scanner = ScannerService()
+
+    try:
+        scan_result = scanner.scan(
+            resolution="60",
+            countback=200,
+        )
+
+        print_scan_results(scan_result)
+
+        logger.info(
+            "Scanner completed: %s successful, %s failed",
+            scan_result.successful_count,
+            scan_result.failed_count,
+        )
+
+    except Exception:
+        logger.exception("Scanner failed.")
+        raise
+
+
+if __name__ == "__main__":
+    main()

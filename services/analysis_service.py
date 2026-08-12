@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from indicators.indicator_engine import IndicatorEngine
@@ -21,6 +23,8 @@ class AnalysisService:
     Orchestrates market data, indicators, detectors, scoring
     and final signal generation.
     """
+
+    MIN_ANALYSIS_CANDLES = 50
 
     def __init__(
         self,
@@ -69,12 +73,109 @@ class AnalysisService:
             }
         )
 
+    @classmethod
+    def _validate_market_data(
+        cls,
+        df: pd.DataFrame,
+    ) -> None:
+        """
+        Validate candle data before running indicators.
+
+        Raises
+        ------
+        ValueError
+            When the market data is not suitable for analysis.
+        """
+
+        required_columns = {
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        }
+
+        missing = required_columns - set(df.columns)
+
+        if missing:
+            raise ValueError(
+                "Invalid market data: missing columns: "
+                + ", ".join(sorted(missing))
+            )
+
+        if len(df) < cls.MIN_ANALYSIS_CANDLES:
+            raise ValueError(
+                "Invalid market data: insufficient candles. "
+                f"Required={cls.MIN_ANALYSIS_CANDLES}, "
+                f"Received={len(df)}"
+            )
+
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        for column in numeric_columns:
+            numeric_values = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
+
+            if numeric_values.isna().any():
+                raise ValueError(
+                    f"Invalid market data: non-numeric values in {column}."
+                )
+
+            if not numeric_values.map(math.isfinite).all():
+                raise ValueError(
+                    f"Invalid market data: non-finite values in {column}."
+                )
+
+        if (df["high"] < df["low"]).any():
+            raise ValueError(
+                "Invalid market data: high is below low."
+            )
+
+        if (df["close"] < df["low"]).any():
+            raise ValueError(
+                "Invalid market data: close is below low."
+            )
+
+        if (df["close"] > df["high"]).any():
+            raise ValueError(
+                "Invalid market data: close is above high."
+            )
+
+        if (df["volume"] < 0).any():
+            raise ValueError(
+                "Invalid market data: negative volume."
+            )
+
+        close_min = float(df["close"].min())
+        close_max = float(df["close"].max())
+
+        if close_min == close_max:
+            raise ValueError(
+                "Invalid market data: flat price."
+            )
+
+        total_volume = float(df["volume"].sum())
+
+        if total_volume <= 0:
+            raise ValueError(
+                "Invalid market data: zero trading volume."
+            )
+
     @staticmethod
     def _latest_indicators(
         enriched_df: pd.DataFrame,
     ) -> dict[str, float]:
         """
-        Extract latest numeric indicator values.
+        Extract latest finite numeric indicator values.
         """
 
         indicator_columns = {
@@ -106,7 +207,12 @@ class AnalysisService:
             if pd.isna(value):
                 continue
 
-            indicators[column] = float(value)
+            numeric_value = float(value)
+
+            if not math.isfinite(numeric_value):
+                continue
+
+            indicators[column] = numeric_value
 
         return indicators
 
@@ -127,6 +233,8 @@ class AnalysisService:
         )
 
         df = self._candles_to_dataframe(candles)
+
+        self._validate_market_data(df)
 
         enriched_df = self.indicator_engine.calculate(df)
 
