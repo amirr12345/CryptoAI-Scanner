@@ -8,6 +8,7 @@ from indicators.ema_indicator import EMAIndicator
 from indicators.macd_indicator import MACDIndicator
 from indicators.rsi_indicator import RSIIndicator
 from indicators.volume_indicator import VolumeIndicator
+from indicators.vwap_indicator import VWAPIndicator
 
 
 class IndicatorEngine:
@@ -31,8 +32,13 @@ class IndicatorEngine:
         bollinger_std_dev: float = 2.0,
         volume_period: int = 20,
     ):
-        self.ema_fast = EMAIndicator(ema_fast_period)
-        self.ema_slow = EMAIndicator(ema_slow_period)
+        self.ema_fast = EMAIndicator(
+            ema_fast_period
+        )
+
+        self.ema_slow = EMAIndicator(
+            ema_slow_period
+        )
 
         self.macd = MACDIndicator(
             fast=macd_fast_period,
@@ -40,18 +46,29 @@ class IndicatorEngine:
             signal=macd_signal_period,
         )
 
-        self.rsi = RSIIndicator(rsi_period)
+        self.rsi = RSIIndicator(
+            rsi_period
+        )
 
-        self.atr = ATRIndicator(atr_period)
+        self.atr = ATRIndicator(
+            atr_period
+        )
 
         self.bollinger = BollingerIndicator(
             period=bollinger_period,
             std_dev=bollinger_std_dev,
         )
 
-        self.volume = VolumeIndicator(volume_period)
+        self.volume = VolumeIndicator(
+            volume_period
+        )
 
-    def calculate(self, data: pd.DataFrame) -> pd.DataFrame:
+        self.vwap = VWAPIndicator()
+
+    def calculate(
+        self,
+        data: pd.DataFrame,
+    ) -> pd.DataFrame:
         """
         Calculate all indicators and return an enriched DataFrame.
 
@@ -71,6 +88,7 @@ class IndicatorEngine:
             self.atr.calculate(result),
             self.bollinger.calculate(result),
             self.volume.calculate(result),
+            self.vwap.calculate(result),
         ]
 
         for indicator_frame in indicator_frames:
