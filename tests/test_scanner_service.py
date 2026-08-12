@@ -93,6 +93,56 @@ def test_scan_multiple_markets():
     assert ranked[2].total_score == -20
 
 
+def test_ranked_results_use_confidence_as_tiebreaker():
+    class TieAnalysisService:
+        def analyze(
+            self,
+            symbol: str,
+            resolution: str = "60",
+            countback: int = 200,
+        ):
+            values = {
+                "BTC": (35, 0.45, "BUY"),
+                "ETH": (35, 0.60, "BUY"),
+                "XRP": (-20, 0.90, "SELL"),
+            }
+
+            score, confidence, signal = values[symbol]
+
+            return AnalysisResult(
+                symbol=symbol,
+                timestamp=1_700_000_000,
+                price=100.0,
+                total_score=score,
+                confidence=confidence,
+                signal=signal,
+                reasons=[],
+                indicators={},
+            )
+
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=TieAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH", "XRP"],
+    )
+
+    ranked = result.ranked_results
+
+    assert ranked[0].symbol == "ETH"
+    assert ranked[0].total_score == 35
+    assert ranked[0].confidence == 0.60
+
+    assert ranked[1].symbol == "BTC"
+    assert ranked[1].total_score == 35
+    assert ranked[1].confidence == 0.45
+
+    assert ranked[2].symbol == "XRP"
+    assert ranked[2].total_score == -20
+
+
 def test_actionable_results_exclude_zero_score():
     scanner = ScannerService(
         market_service=FakeMarketService(),
@@ -106,6 +156,7 @@ def test_actionable_results_exclude_zero_score():
     actionable = result.actionable_results
 
     assert len(actionable) == 3
+
     assert all(
         item.total_score != 0
         for item in actionable
@@ -163,7 +214,6 @@ def test_actionable_results_remove_zero_score_markets():
     )
 
     assert result.successful_count == 3
-
     assert len(result.results) == 3
 
     actionable = result.actionable_results
@@ -175,6 +225,55 @@ def test_actionable_results_remove_zero_score_markets():
 
     assert all(
         item.total_score != 0
+        for item in actionable
+    )
+
+
+def test_actionable_results_exclude_hold_signals():
+    class MixedSignalAnalysisService:
+        def analyze(
+            self,
+            symbol: str,
+            resolution: str = "60",
+            countback: int = 200,
+        ):
+            values = {
+                "BTC": (35, 0.45, "BUY"),
+                "ETH": (15, 0.90, "HOLD"),
+                "XRP": (-20, 0.50, "SELL"),
+            }
+
+            score, confidence, signal = values[symbol]
+
+            return AnalysisResult(
+                symbol=symbol,
+                timestamp=1_700_000_000,
+                price=100.0,
+                total_score=score,
+                confidence=confidence,
+                signal=signal,
+                reasons=[],
+                indicators={},
+            )
+
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=MixedSignalAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH", "XRP"],
+    )
+
+    actionable = result.actionable_results
+
+    assert len(actionable) == 2
+
+    assert actionable[0].symbol == "BTC"
+    assert actionable[1].symbol == "XRP"
+
+    assert all(
+        item.signal != "HOLD"
         for item in actionable
     )
 
