@@ -40,15 +40,15 @@ class ScanResult:
     @property
     def actionable_results(self) -> list[AnalysisResult]:
         """
-        Analysis results with a non-zero score.
+        Actionable trading signals only.
 
-        Score zero means no active detector signal was generated.
-        Such results remain available in `results` but are excluded
-        from the actionable ranking.
+        HOLD results remain available in `results` and
+        `ranked_results`, but are excluded from the actionable
+        ranking.
         """
 
         return [
             result
             for result in self.ranked_results
-            if result.total_score != 0
+            if result.signal != "HOLD"
         ]
