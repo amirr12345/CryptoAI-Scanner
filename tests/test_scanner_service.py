@@ -3,7 +3,6 @@ from services.scanner_service import ScannerService
 
 
 class FakeExchange:
-
     def get_markets(self):
         return {
             "status": "ok",
@@ -17,7 +16,6 @@ class FakeExchange:
 
 
 class FakeMarketService:
-
     def __init__(self):
         self.exchange = FakeExchange()
 
@@ -26,7 +24,6 @@ class FakeMarketService:
 
 
 class FakeAnalysisService:
-
     def analyze(
         self,
         symbol: str,
@@ -66,7 +63,9 @@ def test_extract_rls_symbols():
         }
     }
 
-    symbols = ScannerService._extract_rls_symbols(data)
+    symbols = ScannerService._extract_rls_symbols(
+        data
+    )
 
     assert symbols == ["BTC", "ETH"]
 
@@ -88,7 +87,96 @@ def test_scan_multiple_markets():
     assert ranked[0].total_score == 60
 
     assert ranked[1].symbol == "ETH"
+    assert ranked[1].total_score == 30
+
     assert ranked[2].symbol == "XRP"
+    assert ranked[2].total_score == -20
+
+
+def test_actionable_results_exclude_zero_score():
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=FakeAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH", "XRP"],
+    )
+
+    actionable = result.actionable_results
+
+    assert len(actionable) == 3
+    assert all(
+        item.total_score != 0
+        for item in actionable
+    )
+
+    assert actionable[0].symbol == "BTC"
+    assert actionable[1].symbol == "ETH"
+    assert actionable[2].symbol == "XRP"
+
+
+def test_actionable_results_remove_zero_score_markets():
+    class MixedScoreAnalysisService:
+        def analyze(
+            self,
+            symbol: str,
+            resolution: str = "60",
+            countback: int = 200,
+        ):
+            scores = {
+                "BTC": 60,
+                "ETH": 0,
+                "XRP": -20,
+            }
+
+            return AnalysisResult(
+                symbol=symbol,
+                timestamp=1_700_000_000,
+                price=100.0,
+                total_score=scores[symbol],
+                confidence=(
+                    0.90
+                    if scores[symbol] != 0
+                    else 0.0
+                ),
+                signal=(
+                    "STRONG_BUY"
+                    if scores[symbol] >= 40
+                    else "BUY"
+                    if scores[symbol] >= 20
+                    else "SELL"
+                    if scores[symbol] <= -20
+                    else "HOLD"
+                ),
+                reasons=[],
+                indicators={},
+            )
+
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=MixedScoreAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH", "XRP"],
+    )
+
+    assert result.successful_count == 3
+
+    assert len(result.results) == 3
+
+    actionable = result.actionable_results
+
+    assert len(actionable) == 2
+
+    assert actionable[0].symbol == "BTC"
+    assert actionable[1].symbol == "XRP"
+
+    assert all(
+        item.total_score != 0
+        for item in actionable
+    )
 
 
 def test_scan_specific_symbols():
@@ -106,9 +194,7 @@ def test_scan_specific_symbols():
 
 
 def test_scan_continues_after_symbol_failure():
-
     class FailingAnalysisService:
-
         def analyze(
             self,
             symbol: str,
@@ -116,7 +202,9 @@ def test_scan_continues_after_symbol_failure():
             countback: int = 200,
         ):
             if symbol == "ETH":
-                raise RuntimeError("analysis failed")
+                raise RuntimeError(
+                    "analysis failed"
+                )
 
             return AnalysisResult(
                 symbol=symbol,
@@ -142,4 +230,10 @@ def test_scan_continues_after_symbol_failure():
     assert result.failed_count == 1
 
     assert "ETH" in result.failed_symbols
-    assert result.failed_symbols["ETH"] == "analysis failed"
+
+    assert (
+        result.failed_symbols["ETH"]
+        == "analysis failed"
+    )
+
+    assert len(result.actionable_results) == 2
