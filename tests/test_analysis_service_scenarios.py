@@ -37,7 +37,13 @@ def make_candles(
 
 
 def test_analysis_service_neutral_scenario():
-    closes = [100.0] * 80
+    closes = [
+        100.0,
+        100.2,
+        99.8,
+        100.1,
+        99.9,
+    ] * 16
 
     service = AnalysisService(
         market_service=FakeMarketService(
@@ -48,11 +54,12 @@ def test_analysis_service_neutral_scenario():
     result = service.analyze(
         symbol="BTCIRT",
         resolution="60",
-        countback=80,
+        countback=len(closes),
     )
 
     assert result.symbol == "BTCIRT"
-    assert result.price == 100.0
+    assert result.price == closes[-1]
+
     assert result.signal in {
         "STRONG_BUY",
         "BUY",
@@ -71,7 +78,10 @@ def test_analysis_service_bullish_scenario():
 
     service = AnalysisService(
         market_service=FakeMarketService(
-            make_candles(closes, volume=2000.0)
+            make_candles(
+                closes,
+                volume=2000.0,
+            )
         )
     )
 
@@ -84,6 +94,7 @@ def test_analysis_service_bullish_scenario():
     assert result.symbol == "BTCIRT"
     assert result.price == closes[-1]
     assert result.total_score >= 0
+
     assert result.signal in {
         "STRONG_BUY",
         "BUY",
@@ -100,7 +111,10 @@ def test_analysis_service_bearish_scenario():
 
     service = AnalysisService(
         market_service=FakeMarketService(
-            make_candles(closes, volume=2000.0)
+            make_candles(
+                closes,
+                volume=2000.0,
+            )
         )
     )
 
@@ -113,6 +127,7 @@ def test_analysis_service_bearish_scenario():
     assert result.symbol == "BTCIRT"
     assert result.price == closes[-1]
     assert result.total_score <= 0
+
     assert result.signal in {
         "STRONG_SELL",
         "SELL",
