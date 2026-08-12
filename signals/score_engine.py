@@ -12,7 +12,10 @@ class ScoreEngine:
         results: list[DetectorResult],
     ) -> ScoreResult:
 
-        total_score = sum(result.score for result in results)
+        total_score = sum(
+            result.score
+            for result in results
+        )
 
         detector_count = len(results)
 
@@ -21,12 +24,21 @@ class ScoreEngine:
             for result in results
         ]
 
+        active_results = [
+            result
+            for result in results
+            if result.score != 0
+        ]
+
         confidence = 0.0
 
-        if detector_count > 0:
+        if active_results:
             confidence = (
-                sum(result.confidence for result in results)
-                / detector_count
+                sum(
+                    result.confidence
+                    for result in active_results
+                )
+                / len(active_results)
             )
 
         return ScoreResult(
