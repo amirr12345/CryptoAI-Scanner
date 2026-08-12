@@ -14,6 +14,38 @@ class CVDPoint:
 
 
 @dataclass(slots=True, frozen=True)
+class SwingPoint:
+    """
+    Local swing point detected from a sequence of CVD points.
+
+    kind:
+        HIGH or LOW
+
+    index:
+        Position of the point inside the CVD point sequence.
+    """
+
+    index: int
+    timestamp: int
+    price: float
+    cumulative_delta: float
+    kind: str
+
+
+@dataclass(slots=True, frozen=True)
+class SwingDivergence:
+    """
+    Price/CVD swing-based divergence.
+    """
+
+    signal: str
+    price_change: float
+    cvd_change: float
+    previous_index: int
+    current_index: int
+
+
+@dataclass(slots=True, frozen=True)
 class CVDResult:
     """
     Aggregated Cumulative Volume Delta analysis.
@@ -29,3 +61,5 @@ class CVDResult:
     trend: str
     divergence: str
     points: list[CVDPoint]
+    swing_points: list[SwingPoint]
+    swing_divergences: list[SwingDivergence]
