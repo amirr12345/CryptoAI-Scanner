@@ -8,7 +8,10 @@ class SignalEngine:
     Convert ScoreResult into a trading signal.
     """
 
-    def generate(self, score: ScoreResult) -> SignalResult:
+    def generate(
+        self,
+        score: ScoreResult,
+    ) -> SignalResult:
 
         total = score.total_score
 
