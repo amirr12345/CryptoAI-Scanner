@@ -63,9 +63,7 @@ def test_extract_rls_symbols():
         }
     }
 
-    symbols = ScannerService._extract_rls_symbols(
-        data
-    )
+    symbols = ScannerService._extract_rls_symbols(data)
 
     assert symbols == ["BTC", "ETH"]
 
@@ -301,9 +299,7 @@ def test_scan_continues_after_symbol_failure():
             countback: int = 200,
         ):
             if symbol == "ETH":
-                raise RuntimeError(
-                    "analysis failed"
-                )
+                raise RuntimeError("analysis failed")
 
             return AnalysisResult(
                 symbol=symbol,
@@ -336,3 +332,40 @@ def test_scan_continues_after_symbol_failure():
     )
 
     assert len(result.actionable_results) == 2
+
+
+def test_top_actionable_returns_requested_limit():
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=FakeAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH", "XRP"],
+    )
+
+    top = result.top_actionable(2)
+
+    assert len(top) == 2
+    assert top[0].symbol == "BTC"
+    assert top[1].symbol == "ETH"
+
+
+def test_top_actionable_rejects_invalid_limit():
+    scanner = ScannerService(
+        market_service=FakeMarketService(),
+        analysis_service=FakeAnalysisService(),
+    )
+
+    result = scanner.scan(
+        symbols=["BTC", "ETH"],
+    )
+
+    try:
+        result.top_actionable(0)
+    except ValueError as exc:
+        assert "Limit must be greater than zero" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ValueError for invalid limit."
+        )
