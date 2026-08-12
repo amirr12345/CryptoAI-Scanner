@@ -28,23 +28,34 @@ class ScanResult:
     @property
     def ranked_results(self) -> list[AnalysisResult]:
         """
-        All successful analysis results ranked by score.
+        Rank all successful analysis results.
+
+        Primary sort:
+            total_score descending
+
+        Secondary sort:
+            confidence descending
         """
 
         return sorted(
             self.results,
-            key=lambda result: result.total_score,
+            key=lambda result: (
+                result.total_score,
+                result.confidence,
+            ),
             reverse=True,
         )
 
     @property
     def actionable_results(self) -> list[AnalysisResult]:
         """
-        Actionable trading signals only.
+        Return actionable trading signals only.
 
-        HOLD results remain available in `results` and
-        `ranked_results`, but are excluded from the actionable
-        ranking.
+        HOLD results remain available in:
+            results
+            ranked_results
+
+        but are excluded from actionable ranking.
         """
 
         return [
