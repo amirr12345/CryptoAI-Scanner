@@ -7,15 +7,20 @@ from dataclasses import dataclass
 class MarketSwing:
     """
     Confirmed market-structure swing.
+
+    A swing becomes usable only after the confirmation window
+    has elapsed.
+
+    confirmation_index:
+        Candle index at which the swing becomes observable.
     """
 
     index: int
     timestamp: int
-
     price: float
-
     kind: str
     label: str
+    confirmation_index: int
 
 
 @dataclass(slots=True, frozen=True)

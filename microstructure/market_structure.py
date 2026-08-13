@@ -10,24 +10,12 @@ class MarketStructureEngine:
     """
     Detect swing highs/lows and classify market structure.
 
-    A candle may be both a swing high and a swing low.
-    This can happen in synthetic data and is also possible in
-    real data when a candle expands strongly in both directions.
+    A swing at index i with window N becomes confirmed at:
 
-    Structure labels
-    ----------------
-    HIGH:
-        HH or LH
+        confirmation_index = i + N
 
-    LOW:
-        HL or LL
-
-    Overall structure
-    -----------------
-    BULLISH
-    BEARISH
-    MIXED
-    NEUTRAL
+    The confirmation index is required to prevent
+    look-ahead bias in downstream analysis.
     """
 
     def calculate(
@@ -35,14 +23,6 @@ class MarketStructureEngine:
         candles,
         swing_window: int = 2,
     ) -> MarketStructureResult:
-        """
-        Calculate market structure from candle-like objects.
-
-        Required candle attributes:
-            timestamp
-            high
-            low
-        """
 
         if swing_window < 1:
             raise ValueError(
@@ -59,9 +39,11 @@ class MarketStructureEngine:
                 structure="NEUTRAL",
             )
 
-        if len(candles) < (
+        minimum_length = (
             swing_window * 2 + 1
-        ):
+        )
+
+        if len(candles) < minimum_length:
             return MarketStructureResult(
                 swings=[],
                 latest_high=None,
@@ -73,9 +55,15 @@ class MarketStructureEngine:
 
         raw_swings: list[MarketSwing] = []
 
+        last_candidate_index = (
+            len(candles)
+            - swing_window
+            - 1
+        )
+
         for index in range(
             swing_window,
-            len(candles) - swing_window,
+            last_candidate_index + 1,
         ):
             current = candles[index]
 
@@ -99,10 +87,10 @@ class MarketStructureEngine:
                 for candle in surrounding
             )
 
-            # IMPORTANT:
-            # Do not use `elif` here.
-            # A single candle can qualify as both a swing
-            # high and a swing low.
+            confirmation_index = (
+                index + swing_window
+            )
+
             if is_high:
                 raw_swings.append(
                     MarketSwing(
@@ -115,6 +103,9 @@ class MarketStructureEngine:
                         ),
                         kind="HIGH",
                         label="SWING_HIGH",
+                        confirmation_index=(
+                            confirmation_index
+                        ),
                     )
                 )
 
@@ -130,6 +121,9 @@ class MarketStructureEngine:
                         ),
                         kind="LOW",
                         label="SWING_LOW",
+                        confirmation_index=(
+                            confirmation_index
+                        ),
                     )
                 )
 
@@ -193,11 +187,6 @@ class MarketStructureEngine:
     def _classify_swings(
         swings: list[MarketSwing],
     ) -> list[MarketSwing]:
-        """
-        Return a new immutable swing list with structural labels.
-
-        We never mutate MarketSwing because it is frozen.
-        """
 
         if not swings:
             return []
@@ -207,7 +196,17 @@ class MarketStructureEngine:
         previous_high: MarketSwing | None = None
         previous_low: MarketSwing | None = None
 
-        for swing in swings:
+        # Sort chronologically so classification never depends
+        # on input ordering.
+        ordered_swings = sorted(
+            swings,
+            key=lambda swing: (
+                swing.index,
+                0 if swing.kind == "HIGH" else 1,
+            ),
+        )
+
+        for swing in ordered_swings:
             label = swing.label
 
             if swing.kind == "HIGH":
@@ -237,6 +236,9 @@ class MarketStructureEngine:
                     price=swing.price,
                     kind=swing.kind,
                     label=label,
+                    confirmation_index=(
+                        swing.confirmation_index
+                    ),
                 )
             )
 
@@ -249,9 +251,6 @@ class MarketStructureEngine:
         previous_low: MarketSwing | None,
         latest_low: MarketSwing | None,
     ) -> str:
-        """
-        Determine overall structural direction.
-        """
 
         if (
             previous_high is None

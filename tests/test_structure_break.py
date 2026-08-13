@@ -23,11 +23,11 @@ class FakeCandle:
 
 
 def candle(
-    timestamp: int,
-    high: float,
-    low: float,
-    close: float,
-) -> FakeCandle:
+    timestamp,
+    high,
+    low,
+    close,
+):
     return FakeCandle(
         timestamp=timestamp,
         high=high,
@@ -36,10 +36,27 @@ def candle(
     )
 
 
+def make_swing(
+    index,
+    price,
+    kind,
+    label,
+    confirmation_index,
+):
+    return MarketSwing(
+        index=index,
+        timestamp=index,
+        price=float(price),
+        kind=kind,
+        label=label,
+        confirmation_index=confirmation_index,
+    )
+
+
 def make_structure(
-    swings: list[MarketSwing],
-    structure: str,
-) -> MarketStructureResult:
+    swings,
+    structure,
+):
     highs = [
         swing
         for swing in swings
@@ -79,7 +96,9 @@ def make_structure(
 
 
 def test_empty_input_returns_empty_result():
-    structure = MarketStructureEngine().calculate([])
+    structure = (
+        MarketStructureEngine().calculate([])
+    )
 
     result = StructureBreakEngine().calculate(
         candles=[],
@@ -92,7 +111,9 @@ def test_empty_input_returns_empty_result():
 
 
 def test_rejects_negative_displacement():
-    structure = MarketStructureEngine().calculate([])
+    structure = (
+        MarketStructureEngine().calculate([])
+    )
 
     with pytest.raises(
         ValueError,
@@ -112,9 +133,11 @@ def test_no_structure_produces_no_break():
         candle(2, 102, 92, 97),
     ]
 
-    structure = MarketStructureEngine().calculate(
-        candles,
-        swing_window=1,
+    structure = (
+        MarketStructureEngine().calculate(
+            candles,
+            swing_window=1,
+        )
     )
 
     result = StructureBreakEngine().calculate(
@@ -127,33 +150,33 @@ def test_no_structure_produces_no_break():
 
 def test_bullish_bos():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            100.0,
+            100,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "HH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            95.0,
+            95,
             "LOW",
             "HL",
+            5,
         ),
     ]
 
@@ -164,10 +187,11 @@ def test_bullish_bos():
 
     candles = [
         candle(0, 95, 90, 93),
-        candle(1, 100, 92, 99),
-        candle(2, 105, 94, 104),
+        candle(1, 98, 92, 96),
+        candle(2, 105, 94, 103),
         candle(3, 108, 96, 107),
         candle(4, 115, 100, 111),
+        candle(5, 118, 102, 113),
     ]
 
     result = StructureBreakEngine().calculate(
@@ -175,42 +199,56 @@ def test_bullish_bos():
         structure,
     )
 
-    assert any(
-        event.event == "BOS"
-        and event.direction == "BULLISH"
+    bullish_bos = [
+        event
         for event in result.events
-    )
+        if (
+            event.event == "BOS"
+            and event.direction == "BULLISH"
+        )
+    ]
+
+    assert bullish_bos
+
+    event = bullish_bos[0]
+
+    # First confirmed/broken swing is HIGH at index 1.
+    assert event.broken_index == 1
+    assert event.index == 2
+    assert event.direction == "BULLISH"
+    assert event.displacement > 0
+    assert event.displacement_pct > 0
 
 
 def test_bearish_bos():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            110.0,
+            110,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            105.0,
+            105,
             "HIGH",
             "LH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            85.0,
+            85,
             "LOW",
             "LL",
+            5,
         ),
     ]
 
@@ -225,6 +263,7 @@ def test_bearish_bos():
         candle(2, 102, 88, 90),
         candle(3, 98, 84, 87),
         candle(4, 94, 80, 83),
+        candle(5, 90, 75, 78),
     ]
 
     result = StructureBreakEngine().calculate(
@@ -232,48 +271,56 @@ def test_bearish_bos():
         structure,
     )
 
-    assert any(
-        event.event == "BOS"
-        and event.direction == "BEARISH"
+    bearish_bos = [
+        event
         for event in result.events
-    )
+        if (
+            event.event == "BOS"
+            and event.direction == "BEARISH"
+        )
+    ]
+
+    assert bearish_bos
+
+    event = bearish_bos[0]
+
+    # First confirmed/broken swing is LOW at index 2.
+    assert event.broken_index == 2
+    assert event.index == 3
+    assert event.direction == "BEARISH"
+    assert event.displacement < 0
+    assert event.displacement_pct > 0
 
 
-def test_bullish_choch():
-    # Bearish regime:
-    # 120 -> 110 = LH
-    # 95  -> 90  = LL
-    #
-    # The 110 HIGH is already confirmed before candle 5,
-    # therefore candle 5 can break it.
+def test_bullish_choch_respects_confirmation():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            120.0,
+            120,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            95.0,
+            95,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "LH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            90.0,
+            90,
             "LOW",
             "LL",
+            5,
         ),
     ]
 
@@ -284,10 +331,10 @@ def test_bullish_choch():
 
     candles = [
         candle(0, 118, 100, 110),
-        candle(1, 116, 92, 100),
-        candle(2, 113, 91, 96),
-        candle(3, 111, 90, 92),
-        candle(4, 108, 89, 91),
+        candle(1, 116, 95, 103),
+        candle(2, 114, 92, 98),
+        candle(3, 112, 90, 92),
+        candle(4, 111, 91, 95),
         candle(5, 116, 100, 110.05),
     ]
 
@@ -306,50 +353,46 @@ def test_bullish_choch():
         )
     ]
 
-    assert len(bullish_choch) >= 1
+    assert bullish_choch
 
     event = bullish_choch[0]
 
+    assert event.broken_index == 3
+    assert event.index >= 5
     assert event.direction == "BULLISH"
     assert event.displacement > 0
     assert event.displacement_pct > 0
 
 
-def test_bearish_choch():
-    # Bullish regime:
-    # 110 -> 120 = HH
-    # 90  -> 100 = HL
-    #
-    # The 100 LOW is already confirmed before candle 5,
-    # therefore candle 5 can break it.
+def test_bearish_choch_respects_confirmation():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            110.0,
+            110,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            120.0,
+            120,
             "HIGH",
             "HH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            100.0,
+            100,
             "LOW",
             "HL",
+            5,
         ),
     ]
 
@@ -363,7 +406,7 @@ def test_bearish_choch():
         candle(1, 110, 95, 108),
         candle(2, 115, 98, 112),
         candle(3, 120, 100, 115),
-        candle(4, 112, 99, 105),
+        candle(4, 115, 101, 106),
         candle(5, 108, 96, 99.90),
     ]
 
@@ -382,10 +425,12 @@ def test_bearish_choch():
         )
     ]
 
-    assert len(bearish_choch) >= 1
+    assert bearish_choch
 
     event = bearish_choch[0]
 
+    assert event.broken_index == 4
+    assert event.index >= 5
     assert event.direction == "BEARISH"
     assert event.displacement < 0
     assert event.displacement_pct > 0
@@ -393,33 +438,33 @@ def test_bearish_choch():
 
 def test_bullish_mss_requires_displacement():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            120.0,
+            120,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            95.0,
+            95,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "LH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            90.0,
+            90,
             "LOW",
             "LL",
+            5,
         ),
     ]
 
@@ -430,7 +475,7 @@ def test_bullish_mss_requires_displacement():
 
     candles = [
         candle(0, 118, 100, 110),
-        candle(1, 114, 94, 100),
+        candle(1, 114, 94, 101),
         candle(2, 112, 92, 96),
         candle(3, 108, 90, 92),
         candle(4, 107, 88, 91),
@@ -452,7 +497,7 @@ def test_bullish_mss_requires_displacement():
         )
     ]
 
-    assert len(bullish_mss) >= 1
+    assert bullish_mss
 
     event = bullish_mss[0]
 
@@ -463,33 +508,33 @@ def test_bullish_mss_requires_displacement():
 
 def test_bearish_mss_requires_displacement():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            110.0,
+            110,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            120.0,
+            120,
             "HIGH",
             "HH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            100.0,
+            100,
             "LOW",
             "HL",
+            5,
         ),
     ]
 
@@ -522,7 +567,7 @@ def test_bearish_mss_requires_displacement():
         )
     ]
 
-    assert len(bearish_mss) >= 1
+    assert bearish_mss
 
     event = bearish_mss[0]
 
@@ -533,33 +578,33 @@ def test_bearish_mss_requires_displacement():
 
 def test_same_swing_is_not_broken_twice():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            100.0,
+            100,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "HH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            95.0,
+            95,
             "LOW",
             "HL",
+            5,
         ),
     ]
 
@@ -569,11 +614,12 @@ def test_same_swing_is_not_broken_twice():
     )
 
     candles = [
-        candle(0, 100, 90, 95),
-        candle(1, 105, 92, 99),
-        candle(2, 108, 94, 107),
-        candle(3, 112, 96, 111),
-        candle(4, 114, 98, 113),
+        candle(0, 95, 90, 93),
+        candle(1, 99, 92, 97),
+        candle(2, 105, 94, 103),
+        candle(3, 108, 96, 107),
+        candle(4, 115, 100, 111),
+        candle(5, 118, 102, 114),
     ]
 
     result = StructureBreakEngine().calculate(
@@ -581,66 +627,117 @@ def test_same_swing_is_not_broken_twice():
         structure,
     )
 
-    bullish_breaks = [
+    broken_once = [
         event
         for event in result.events
-        if (
-            event.direction == "BULLISH"
-            and event.broken_index == 3
-        )
+        if event.broken_index == 1
     ]
 
-    assert len(bullish_breaks) <= 1
+    assert len(broken_once) <= 1
 
 
-def test_lookahead_is_not_used_for_regime():
-    """
-    Future swings must not retroactively affect earlier breaks.
-    """
+def test_break_before_confirmation_is_ignored():
+    swing = make_swing(
+        2,
+        100,
+        "HIGH",
+        "HH",
+        4,
+    )
 
+    structure = make_structure(
+        [
+            make_swing(
+                0,
+                90,
+                "HIGH",
+                "SWING_HIGH",
+                2,
+            ),
+            make_swing(
+                1,
+                80,
+                "LOW",
+                "SWING_LOW",
+                3,
+            ),
+            swing,
+            make_swing(
+                3,
+                85,
+                "LOW",
+                "HL",
+                5,
+            ),
+        ],
+        "BULLISH",
+    )
+
+    candles = [
+        candle(0, 90, 80, 85),
+        candle(1, 95, 82, 90),
+        candle(2, 105, 88, 101),
+        candle(3, 110, 90, 108),
+        candle(4, 112, 92, 111),
+    ]
+
+    result = StructureBreakEngine().calculate(
+        candles,
+        structure,
+    )
+
+    assert all(
+        not (
+            event.broken_index == 2
+            and event.index < 4
+        )
+        for event in result.events
+    )
+
+
+def test_lookahead_is_not_used():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            120.0,
+            120,
             "HIGH",
             "SWING_HIGH",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            95.0,
+            95,
             "LOW",
             "SWING_LOW",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "LH",
+            5,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            90.0,
+            90,
             "LOW",
             "LL",
+            6,
         ),
-        # Future swings.
-        MarketSwing(
+        make_swing(
             8,
-            8,
-            130.0,
+            130,
             "HIGH",
             "HH",
+            10,
         ),
-        MarketSwing(
+        make_swing(
             9,
-            9,
-            100.0,
+            100,
             "LOW",
             "HL",
+            11,
         ),
     ]
 
@@ -660,6 +757,8 @@ def test_lookahead_is_not_used_for_regime():
         candle(7, 125, 100, 120),
         candle(8, 135, 105, 130),
         candle(9, 140, 110, 135),
+        candle(10, 145, 115, 140),
+        candle(11, 150, 120, 145),
     ]
 
     result = StructureBreakEngine().calculate(
@@ -671,40 +770,41 @@ def test_lookahead_is_not_used_for_regime():
     assert result.events
 
     assert all(
-        event.index > event.broken_index
+        event.index
+        > event.broken_index
         for event in result.events
     )
 
 
 def test_latest_event_matches_last_event():
     swings = [
-        MarketSwing(
+        make_swing(
             1,
-            1,
-            100.0,
+            100,
             "HIGH",
             "SWING_HIGH",
+            2,
         ),
-        MarketSwing(
+        make_swing(
             2,
-            2,
-            90.0,
+            90,
             "LOW",
             "SWING_LOW",
+            3,
         ),
-        MarketSwing(
+        make_swing(
             3,
-            3,
-            110.0,
+            110,
             "HIGH",
             "HH",
+            4,
         ),
-        MarketSwing(
+        make_swing(
             4,
-            4,
-            95.0,
+            95,
             "LOW",
             "HL",
+            5,
         ),
     ]
 
@@ -717,7 +817,8 @@ def test_latest_event_matches_last_event():
         candle(0, 100, 90, 95),
         candle(1, 104, 92, 101),
         candle(2, 108, 94, 106),
-        candle(3, 115, 96, 112),
+        candle(3, 112, 96, 109),
+        candle(4, 115, 98, 112),
     ]
 
     result = StructureBreakEngine().calculate(
