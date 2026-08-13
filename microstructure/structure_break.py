@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-from models.market_structure import MarketStructureResult
+from models.market_structure import (
+    MarketStructureResult,
+    MarketSwing,
+)
 from models.structure_break import StructureBreak
 from models.structure_break_result import StructureBreakResult
 
 
 class StructureBreakEngine:
     """
-    Detect BOS, CHoCH and MSS from confirmed market swings.
+    Chronological BOS / CHoCH / MSS engine.
 
-    The engine does not create trading signals.
+    Important:
+        The structure regime used to classify a break is derived
+        only from swings confirmed before the break candle.
+
+    This avoids look-ahead bias.
     """
 
     def calculate(
@@ -19,24 +26,20 @@ class StructureBreakEngine:
         displacement_pct: float = 0.15,
     ) -> StructureBreakResult:
         """
-        Detect structural breaks.
+        Detect BOS / CHoCH / MSS chronologically.
 
         Parameters
         ----------
         candles:
-            Candle-like objects containing:
+            Candle-like objects with:
                 timestamp
                 close
 
         structure:
-            Result produced by MarketStructureEngine.
+            MarketStructureResult containing confirmed swings.
 
         displacement_pct:
-            Minimum percentage displacement required to classify
-            a qualifying CHoCH as MSS.
-
-            Example:
-                0.15 = 0.15 percent
+            Minimum percentage displacement required for MSS.
         """
 
         if displacement_pct < 0:
@@ -44,223 +47,384 @@ class StructureBreakEngine:
                 "Displacement percentage cannot be negative."
             )
 
-        if not candles:
+        if not candles or not structure.swings:
             return StructureBreakResult()
 
-        swings = structure.swings
-
-        if not swings:
-            return StructureBreakResult()
-
-        events: list[StructureBreak] = []
-
-        # Only confirmed structural swings can be broken.
-        #
-        # We evaluate each candle after a swing against the
-        # latest confirmed opposite swing.
-        #
-        # To avoid generating the same break repeatedly, each
-        # reference swing can only be broken once.
+        swings = sorted(
+            structure.swings,
+            key=lambda swing: (
+                swing.index,
+                0 if swing.kind == "HIGH" else 1,
+            ),
+        )
 
         broken_highs: set[int] = set()
         broken_lows: set[int] = set()
 
-        current_structure = structure.structure
+        events: list[StructureBreak] = []
 
-        for index, candle in enumerate(candles):
+        for candle_index, candle in enumerate(candles):
             close_price = float(candle.close)
             timestamp = int(candle.timestamp)
 
-            high_candidates = [
+            confirmed_swings = [
                 swing
                 for swing in swings
-                if swing.kind == "HIGH"
-                and swing.index < index
-                and swing.index not in broken_highs
+                if swing.index < candle_index
             ]
 
-            low_candidates = [
-                swing
-                for swing in swings
-                if swing.kind == "LOW"
-                and swing.index < index
-                and swing.index not in broken_lows
-            ]
+            if not confirmed_swings:
+                continue
 
-            latest_high = (
-                high_candidates[-1]
-                if high_candidates
-                else None
+            regime = self._structure_at(
+                confirmed_swings
             )
 
-            latest_low = (
-                low_candidates[-1]
-                if low_candidates
-                else None
+            latest_high = self._latest_unbroken(
+                confirmed_swings,
+                kind="HIGH",
+                broken_indexes=broken_highs,
             )
 
-            # --------------------------------------------------
-            # Bullish break: close above a confirmed swing high
-            # --------------------------------------------------
+            latest_low = self._latest_unbroken(
+                confirmed_swings,
+                kind="LOW",
+                broken_indexes=broken_lows,
+            )
+
+            # Evaluate only the level that corresponds to
+            # the current structural regime.
+            #
+            # BULLISH:
+            #   break HIGH -> BOS
+            #   break LOW  -> CHoCH/MSS
+            #
+            # BEARISH:
+            #   break LOW  -> BOS
+            #   break HIGH -> CHoCH/MSS
+            #
+            # MIXED/NEUTRAL:
+            #   first valid directional break -> BOS
+
             if (
-                latest_high is not None
+                regime == "BULLISH"
+                and latest_high is not None
+                and latest_high.index not in broken_highs
                 and close_price > latest_high.price
             ):
-                broken_highs.add(
-                    latest_high.index
+                event = self._create_break(
+                    candle_index=candle_index,
+                    timestamp=timestamp,
+                    close_price=close_price,
+                    broken_swing=latest_high,
+                    event="BOS",
+                    direction="BULLISH",
+                    displacement_pct=displacement_pct,
                 )
 
-                displacement = (
-                    close_price
-                    - latest_high.price
-                )
+                events.append(event)
+                broken_highs.add(latest_high.index)
+                continue
 
-                displacement_pct_value = (
-                    displacement
-                    / latest_high.price
-                    * 100.0
-                    if latest_high.price != 0
-                    else 0.0
-                )
-
-                event = self._classify_break(
-                    break_direction="BULLISH",
-                    current_structure=current_structure,
-                    displacement_pct_value=(
-                        displacement_pct_value
-                    ),
-                    displacement_threshold=(
-                        displacement_pct
-                    ),
-                )
-
-                events.append(
-                    StructureBreak(
-                        index=index,
-                        timestamp=timestamp,
-                        price=close_price,
-                        event=event,
-                        direction="BULLISH",
-                        broken_index=latest_high.index,
-                        broken_price=latest_high.price,
-                        displacement=round(
-                            displacement,
-                            8,
-                        ),
-                        displacement_pct=round(
-                            displacement_pct_value,
-                            6,
-                        ),
-                    )
-                )
-
-                current_structure = (
-                    "BULLISH"
-                )
-
-            # --------------------------------------------------
-            # Bearish break: close below a confirmed swing low
-            # --------------------------------------------------
             if (
-                latest_low is not None
+                regime == "BULLISH"
+                and latest_low is not None
+                and latest_low.index not in broken_lows
                 and close_price < latest_low.price
             ):
-                broken_lows.add(
-                    latest_low.index
-                )
-
-                displacement = (
-                    close_price
-                    - latest_low.price
-                )
-
-                displacement_pct_value = (
-                    abs(displacement)
-                    / latest_low.price
-                    * 100.0
-                    if latest_low.price != 0
-                    else 0.0
-                )
-
-                event = self._classify_break(
-                    break_direction="BEARISH",
-                    current_structure=current_structure,
-                    displacement_pct_value=(
-                        displacement_pct_value
+                event_name = self._reversal_event(
+                    direction="BEARISH",
+                    displacement_pct_value=self._displacement_pct(
+                        close_price,
+                        latest_low.price,
                     ),
-                    displacement_threshold=(
-                        displacement_pct
-                    ),
+                    threshold=displacement_pct,
                 )
 
-                events.append(
-                    StructureBreak(
-                        index=index,
+                event = self._create_break(
+                    candle_index=candle_index,
+                    timestamp=timestamp,
+                    close_price=close_price,
+                    broken_swing=latest_low,
+                    event=event_name,
+                    direction="BEARISH",
+                    displacement_pct=displacement_pct,
+                )
+
+                events.append(event)
+                broken_lows.add(latest_low.index)
+                continue
+
+            if (
+                regime == "BEARISH"
+                and latest_low is not None
+                and latest_low.index not in broken_lows
+                and close_price < latest_low.price
+            ):
+                event = self._create_break(
+                    candle_index=candle_index,
+                    timestamp=timestamp,
+                    close_price=close_price,
+                    broken_swing=latest_low,
+                    event="BOS",
+                    direction="BEARISH",
+                    displacement_pct=displacement_pct,
+                )
+
+                events.append(event)
+                broken_lows.add(latest_low.index)
+                continue
+
+            if (
+                regime == "BEARISH"
+                and latest_high is not None
+                and latest_high.index not in broken_highs
+                and close_price > latest_high.price
+            ):
+                event_name = self._reversal_event(
+                    direction="BULLISH",
+                    displacement_pct_value=self._displacement_pct(
+                        close_price,
+                        latest_high.price,
+                    ),
+                    threshold=displacement_pct,
+                )
+
+                event = self._create_break(
+                    candle_index=candle_index,
+                    timestamp=timestamp,
+                    close_price=close_price,
+                    broken_swing=latest_high,
+                    event=event_name,
+                    direction="BULLISH",
+                    displacement_pct=displacement_pct,
+                )
+
+                events.append(event)
+                broken_highs.add(latest_high.index)
+                continue
+
+            if regime in {"MIXED", "NEUTRAL"}:
+                if (
+                    latest_high is not None
+                    and latest_high.index not in broken_highs
+                    and close_price > latest_high.price
+                ):
+                    event = self._create_break(
+                        candle_index=candle_index,
                         timestamp=timestamp,
-                        price=close_price,
-                        event=event,
-                        direction="BEARISH",
-                        broken_index=latest_low.index,
-                        broken_price=latest_low.price,
-                        displacement=round(
-                            displacement,
-                            8,
-                        ),
-                        displacement_pct=round(
-                            displacement_pct_value,
-                            6,
-                        ),
+                        close_price=close_price,
+                        broken_swing=latest_high,
+                        event="BOS",
+                        direction="BULLISH",
+                        displacement_pct=displacement_pct,
                     )
-                )
 
-                current_structure = (
-                    "BEARISH"
-                )
+                    events.append(event)
+                    broken_highs.add(
+                        latest_high.index
+                    )
+                    continue
+
+                if (
+                    latest_low is not None
+                    and latest_low.index not in broken_lows
+                    and close_price < latest_low.price
+                ):
+                    event = self._create_break(
+                        candle_index=candle_index,
+                        timestamp=timestamp,
+                        close_price=close_price,
+                        broken_swing=latest_low,
+                        event="BOS",
+                        direction="BEARISH",
+                        displacement_pct=displacement_pct,
+                    )
+
+                    events.append(event)
+                    broken_lows.add(
+                        latest_low.index
+                    )
 
         return self._build_result(events)
 
     @staticmethod
-    def _classify_break(
-        break_direction: str,
-        current_structure: str,
-        displacement_pct_value: float,
-        displacement_threshold: float,
+    def _structure_at(
+        swings: list[MarketSwing],
     ) -> str:
         """
-        Classify one structural break.
+        Determine the structural regime using only swings
+        already confirmed at the current point in time.
         """
 
-        if current_structure == "BULLISH":
-            if break_direction == "BULLISH":
-                return "BOS"
+        highs = [
+            swing
+            for swing in swings
+            if swing.kind == "HIGH"
+        ]
 
+        lows = [
+            swing
+            for swing in swings
+            if swing.kind == "LOW"
+        ]
+
+        if len(highs) < 2 or len(lows) < 2:
+            return "NEUTRAL"
+
+        previous_high = highs[-2]
+        latest_high = highs[-1]
+
+        previous_low = lows[-2]
+        latest_low = lows[-1]
+
+        higher_high = (
+            latest_high.price
+            > previous_high.price
+        )
+
+        lower_high = (
+            latest_high.price
+            < previous_high.price
+        )
+
+        higher_low = (
+            latest_low.price
+            > previous_low.price
+        )
+
+        lower_low = (
+            latest_low.price
+            < previous_low.price
+        )
+
+        if higher_high and higher_low:
+            return "BULLISH"
+
+        if lower_high and lower_low:
+            return "BEARISH"
+
+        if (
+            higher_high and lower_low
+        ) or (
+            lower_high and higher_low
+        ):
+            return "MIXED"
+
+        return "NEUTRAL"
+
+    @staticmethod
+    def _latest_unbroken(
+        swings: list[MarketSwing],
+        kind: str,
+        broken_indexes: set[int],
+    ) -> MarketSwing | None:
+        """
+        Return the latest confirmed unbroken swing of a type.
+        """
+
+        candidates = [
+            swing
+            for swing in swings
             if (
-                break_direction == "BEARISH"
-                and displacement_pct_value
-                >= displacement_threshold
-            ):
-                return "MSS"
+                swing.kind == kind
+                and swing.index not in broken_indexes
+            )
+        ]
 
-            return "CHoCH"
+        if not candidates:
+            return None
 
-        if current_structure == "BEARISH":
-            if break_direction == "BEARISH":
-                return "BOS"
+        return candidates[-1]
 
-            if (
-                break_direction == "BULLISH"
-                and displacement_pct_value
-                >= displacement_threshold
-            ):
-                return "MSS"
+    @staticmethod
+    def _displacement_pct(
+        current_price: float,
+        broken_price: float,
+    ) -> float:
+        """
+        Return absolute displacement percentage.
+        """
 
-            return "CHoCH"
+        if broken_price == 0:
+            return 0.0
 
-        # Neutral or mixed structure:
-        # first directional structural break is treated as BOS
-        # rather than CHoCH because no prior directional regime
-        # exists.
-        return "BOS"
+        return (
+            abs(current_price - broken_price)
+            / abs(broken_price)
+            * 100.0
+        )
+
+    @staticmethod
+    def _reversal_event(
+        direction: str,
+        displacement_pct_value: float,
+        threshold: float,
+    ) -> str:
+        """
+        Classify reversal break.
+
+        CHoCH:
+            Structural direction changes without sufficient
+            displacement.
+
+        MSS:
+            Structural direction changes with sufficient
+            displacement.
+        """
+
+        if (
+            displacement_pct_value
+            >= threshold
+        ):
+            return "MSS"
+
+        return "CHoCH"
+
+    @staticmethod
+    def _create_break(
+        candle_index: int,
+        timestamp: int,
+        close_price: float,
+        broken_swing: MarketSwing,
+        event: str,
+        direction: str,
+        displacement_pct: float,
+    ) -> StructureBreak:
+        """
+        Create immutable StructureBreak.
+        """
+
+        displacement = (
+            close_price
+            - broken_swing.price
+        )
+
+        displacement_percentage = (
+            abs(displacement)
+            / abs(broken_swing.price)
+            * 100.0
+            if broken_swing.price != 0
+            else 0.0
+        )
+
+        return StructureBreak(
+            index=candle_index,
+            timestamp=timestamp,
+            price=close_price,
+            event=event,
+            direction=direction,
+            broken_index=broken_swing.index,
+            broken_price=broken_swing.price,
+            displacement=round(
+                displacement,
+                8,
+            ),
+            displacement_pct=round(
+                displacement_percentage,
+                6,
+            ),
+        )
 
     @staticmethod
     def _build_result(
