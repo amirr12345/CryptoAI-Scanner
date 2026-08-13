@@ -14,11 +14,7 @@ class FakeCandle:
     low: float
 
 
-def candle(
-    timestamp: int,
-    high: float,
-    low: float,
-) -> FakeCandle:
+def candle(timestamp, high, low):
     return FakeCandle(
         timestamp=timestamp,
         high=high,
@@ -181,6 +177,7 @@ def test_classifies_higher_low():
     ]
 
     assert len(lows) == 2
+    assert lows[0].label == "SWING_LOW"
     assert lows[1].label == "HL"
 
 
@@ -205,6 +202,7 @@ def test_classifies_lower_low():
     ]
 
     assert len(lows) == 2
+    assert lows[0].label == "SWING_LOW"
     assert lows[1].label == "LL"
 
 
@@ -258,4 +256,71 @@ def test_detects_mixed_structure():
 
     assert result.structure == "MIXED"
 
-    
+
+def test_swing_confirmation_index_matches_window():
+    candles = [
+        candle(0, 100, 90),
+        candle(1, 110, 95),
+        candle(2, 102, 96),
+        candle(3, 115, 100),
+        candle(4, 105, 101),
+    ]
+
+    result = MarketStructureEngine().calculate(
+        candles,
+        swing_window=1,
+    )
+
+    assert result.swings
+
+    for swing in result.swings:
+        assert (
+            swing.confirmation_index
+            == swing.index + 1
+        )
+
+
+def test_swing_confirmation_index_matches_larger_window():
+    candles = [
+        candle(0, 100, 90),
+        candle(1, 102, 91),
+        candle(2, 110, 95),
+        candle(3, 103, 97),
+        candle(4, 101, 96),
+        candle(5, 115, 100),
+        candle(6, 105, 101),
+    ]
+
+    result = MarketStructureEngine().calculate(
+        candles,
+        swing_window=2,
+    )
+
+    assert result.swings
+
+    for swing in result.swings:
+        assert (
+            swing.confirmation_index
+            == swing.index + 2
+        )
+
+
+def test_swing_is_not_available_before_confirmation():
+    candles = [
+        candle(0, 100, 90),
+        candle(1, 110, 95),
+        candle(2, 102, 96),
+        candle(3, 115, 100),
+        candle(4, 105, 101),
+    ]
+
+    result = MarketStructureEngine().calculate(
+        candles,
+        swing_window=2,
+    )
+
+    for swing in result.swings:
+        assert (
+            swing.confirmation_index
+            > swing.index
+        )
