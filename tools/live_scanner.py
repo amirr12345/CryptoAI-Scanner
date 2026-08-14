@@ -41,21 +41,12 @@ class ScanSummary:
 
 class LiveScanner:
     """
-    Live market scanner with USDT as the analysis reference.
+    Live scanner with BASE/USDT as the primary
+    analytical market.
 
-    Market identity:
+    BASE/IRT is not the analytical source.
 
-        BASE/USDT
-            -> primary analysis market
-
-        BASE/IRT
-            -> local Nobitex execution market
-
-        USDT/IRT
-            -> quote bridge
-
-    The scanner never treats BASE/IRT as the primary
-    analytical identity when a BASE/USDT reference exists.
+    USDT/IRT is only the local quote bridge.
     """
 
     def __init__(
@@ -100,23 +91,21 @@ class LiveScanner:
             )
         )
 
-        self.timeframe = str(timeframe)
-        self.candle_limit = int(candle_limit)
+        self.timeframe = str(
+            timeframe
+        )
+
+        self.candle_limit = int(
+            candle_limit
+        )
 
     @staticmethod
-    def _extract_symbols(
+    def _extract_usdt_markets(
         markets: dict,
     ) -> list[str]:
         """
-        Extract BASE assets from the RLS market list.
-
-        Example:
-
-            BTC-rls -> BTC
-            ETH-rls -> ETH
-
-        The scanner subsequently resolves BASE -> BASEUSDT
-        through MarketRegistry.
+        Discover BASEUSDT analysis markets
+        directly from Nobitex.
         """
 
         stats = markets.get(
@@ -124,132 +113,132 @@ class LiveScanner:
             {},
         )
 
-        symbols: set[str] = set()
+        analysis_markets: set[str] = set()
 
         for key in stats:
-            if not key.endswith("-rls"):
-                continue
-
-            symbol = (
-                key[:-4]
+            value = (
+                str(key)
                 .strip()
                 .upper()
             )
 
-            if symbol:
-                symbols.add(symbol)
+            if not value.endswith(
+                "-USDT"
+            ):
+                continue
 
-        return sorted(symbols)
+            base = value[:-5]
 
-    def _resolve_market(
-        self,
-        base_symbol: str,
-    ) -> MarketDescriptor:
-        """
-        Resolve the analytical and execution identity
-        of a BASE asset.
-        """
+            if not base:
+                continue
 
-        base = (
-            base_symbol
+            analysis_markets.add(
+                f"{base}USDT"
+            )
+
+        return sorted(
+            analysis_markets
+        )
+
+    @staticmethod
+    def _base_from_usdt_market(
+        market_symbol: str,
+    ) -> str:
+        value = (
+            market_symbol
             .strip()
             .upper()
         )
 
+        if not value.endswith(
+            "USDT"
+        ):
+            raise ValueError(
+                f"Not a USDT market: "
+                f"{market_symbol}"
+            )
+
+        base = value[:-4]
+
         if not base:
             raise ValueError(
-                "Base symbol cannot be empty."
+                f"Invalid USDT market: "
+                f"{market_symbol}"
             )
 
-        usdt_market = (
-            self.market_registry.usdt_market(
-                base
-            )
+        return base
+
+    def _resolve_market(
+        self,
+        analysis_market: str,
+    ) -> MarketDescriptor:
+        value = (
+            analysis_market
+            .strip()
+            .upper()
         )
 
-        irt_market = (
-            self.market_registry.irt_market(
-                base
+        if not value.endswith(
+            "USDT"
+        ):
+            raise ValueError(
+                "Analysis market must be BASEUSDT."
             )
-        )
 
-        # Prefer the USDT market if it exists in the
-        # discovered registry.
-        usdt_descriptor = (
+        descriptor = (
             self.market_registry.get(
-                usdt_market
+                value
             )
         )
 
-        if usdt_descriptor is not None:
-            return usdt_descriptor
+        if descriptor is not None:
+            return descriptor
 
-        # If BASE/USDT is not in the discovered market set,
-        # keep BASE/IRT as execution while preserving
-        # BASE/USDT as the analytical reference.
-        return MarketDescriptor(
-            market_symbol=irt_market,
-            base_asset=base,
-            quote_asset="IRT",
-            analysis_market=usdt_market,
-            execution_market=irt_market,
+        base = (
+            self._base_from_usdt_market(
+                value
+            )
         )
 
-    def _history_symbol(
+        return MarketDescriptor(
+            market_symbol=value,
+            base_asset=base,
+            quote_asset="USDT",
+            analysis_market=value,
+            execution_market=(
+                f"{base}IRT"
+            ),
+        )
+
+    def scan_market(
         self,
-        descriptor: MarketDescriptor,
-    ) -> str:
-        """
-        Return the market identifier expected by the
-        current MarketService.
-
-        BASEUSDT remains the analytical reference.
-
-        The current scanner uses the same logical market
-        identifier for historical candles.
-        """
-
-        return descriptor.analysis_market
-
-    def scan_symbol(
-        self,
-        symbol: str,
+        analysis_market: str,
     ) -> LiveConfluenceResult:
         """
-        Scan one BASE asset using BASE/USDT as the
-        analytical reference.
+        Scan one BASE/USDT analytical market.
         """
 
         descriptor = (
             self._resolve_market(
-                symbol
+                analysis_market
             )
         )
 
-        analysis_market = (
-            self._history_symbol(
-                descriptor
-            )
-        )
-
-        # Bootstrap history using the analytical market.
         bootstrap_candles = (
             self.market_service.history(
-                analysis_market,
+                descriptor.analysis_market,
                 resolution=self.timeframe,
                 countback=self.candle_limit,
             )
         )
 
-        # Live candles are also looked up by the analytical
-        # market identifier first.
         latest_trade_timestamp = (
             self.trade_store.latest_timestamp(
                 descriptor.base_asset
             )
         )
 
-        result = (
+        return (
             self.confluence_service.evaluate(
                 symbol=descriptor.base_asset,
                 candles=bootstrap_candles,
@@ -260,8 +249,6 @@ class LiveScanner:
                 candle_limit=self.candle_limit,
             )
         )
-
-        return result
 
     def scan(
         self,
@@ -276,60 +263,52 @@ class LiveScanner:
         ],
         ScanSummary,
     ]:
-        """
-        Scan all BASE assets.
-
-        Each result carries:
-            BASE
-            analysis market
-            execution market
-            confluence result
-        """
-
         if symbols is None:
             markets = (
                 self.market_service.markets()
             )
 
             symbols = (
-                self._extract_symbols(
+                self._extract_usdt_markets(
                     markets
                 )
             )
 
-        results: list[
-            tuple[
-                str,
-                MarketDescriptor,
-                LiveConfluenceResult,
-            ]
-        ] = []
+        results = []
 
         status_counter = Counter()
         grade_counter = Counter()
 
-        for symbol in symbols:
+        for analysis_market in symbols:
+            analysis_market = (
+                analysis_market
+                .strip()
+                .upper()
+            )
+
             base_symbol = (
-                symbol.strip().upper()
+                self._base_from_usdt_market(
+                    analysis_market
+                )
             )
 
             try:
                 descriptor = (
                     self._resolve_market(
-                        base_symbol
+                        analysis_market
                     )
                 )
 
                 result = (
-                    self.scan_symbol(
-                        base_symbol
+                    self.scan_market(
+                        analysis_market
                     )
                 )
 
             except Exception as exc:
                 descriptor = (
                     self._resolve_market(
-                        base_symbol
+                        analysis_market
                     )
                 )
 
@@ -424,61 +403,64 @@ def print_results(
 ) -> None:
     print()
     print("=" * 150)
-    print("LIVE CONFLUENCE SCANNER - USDT REFERENCE")
+    print(
+        "LIVE CONFLUENCE SCANNER "
+        "- USDT ANALYSIS"
+    )
     print("=" * 150)
 
     print(
-        f"Total BASE assets      : "
+        f"Total USDT markets : "
         f"{summary.total_symbols}"
     )
 
     print(
-        f"Evaluated              : "
+        f"Evaluated          : "
         f"{summary.evaluated}"
     )
 
     print(
-        f"STALE_CANDLES          : "
+        f"STALE_CANDLES      : "
         f"{summary.stale_candles}"
     )
 
     print(
-        f"NO_CANDLES             : "
+        f"NO_CANDLES         : "
         f"{summary.no_candles}"
     )
 
     print(
-        f"NO_STRUCTURE           : "
+        f"NO_STRUCTURE       : "
         f"{summary.no_structure}"
     )
 
     print(
-        f"NO_STRUCTURE_BREAK     : "
+        f"NO_STRUCTURE_BREAK : "
         f"{summary.no_structure_break}"
     )
 
     print(
-        f"NO_LIQUIDITY_SWEEP     : "
+        f"NO_LIQUIDITY_SWEEP : "
         f"{summary.no_liquidity_sweep}"
     )
 
     print(
-        f"NO_STRUCTURE_SETUP     : "
+        f"NO_STRUCTURE_SETUP : "
         f"{summary.no_structure_setup}"
     )
 
     print(
-        f"NO_HISTORICAL_DATA     : "
+        f"NO_HISTORICAL_DATA : "
         f"{summary.no_historical_data}"
     )
 
     print(
-        f"INSUFFICIENT_CANDLES   : "
+        f"INSUFFICIENT_CANDLES: "
         f"{summary.insufficient_candles}"
     )
 
     print(
-        f"ERRORS                 : "
+        f"ERRORS             : "
         f"{summary.errors}"
     )
 
@@ -516,22 +498,22 @@ def print_results(
     print("-" * 150)
 
     for (
-        symbol,
+        base,
         descriptor,
         result,
     ) in results:
+        direction = (
+            result.setup.direction
+            if result.setup is not None
+            else "-"
+        )
+
         if (
             result.confluence
             is not None
         ):
-            direction = (
-                result.setup.direction
-                if result.setup is not None
-                else "-"
-            )
-
             print(
-                f"{symbol:<12} "
+                f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
                 f"{descriptor.execution_market:<14} "
                 f"{result.status:<24} "
@@ -542,14 +524,8 @@ def print_results(
             )
 
         else:
-            direction = (
-                result.setup.direction
-                if result.setup is not None
-                else "-"
-            )
-
             print(
-                f"{symbol:<12} "
+                f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
                 f"{descriptor.execution_market:<14} "
                 f"{result.status:<24} "
@@ -569,9 +545,7 @@ def main() -> None:
         candle_limit=200,
     )
 
-    results, summary = (
-        scanner.scan()
-    )
+    results, summary = scanner.scan()
 
     print_results(
         results=results,

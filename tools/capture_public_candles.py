@@ -42,28 +42,12 @@ def normalize_market_symbol(
             "Symbol cannot be empty."
         )
 
-    if value.endswith("IRT"):
-        return value
-
-    return f"{value}IRT"
+    return value
 
 
 def project_symbol(
     market_symbol: str,
 ) -> str:
-    """
-    Return BASE asset only.
-
-    Examples:
-        BTCIRT  -> BTC
-        BTCUSDT -> BTC
-        ETHIRT  -> ETH
-        USDTIRT -> USDT
-
-    This function is only for display/backward compatibility.
-    Market identity must be handled by MarketRegistry.
-    """
-
     value = market_symbol.strip().upper()
 
     for quote in (
@@ -72,9 +56,7 @@ def project_symbol(
         "IRT",
     ):
         if value.endswith(quote):
-            base = value[
-                : -len(quote)
-            ]
+            base = value[:-len(quote)]
 
             if base:
                 return base
@@ -82,19 +64,19 @@ def project_symbol(
     return value
 
 
-def extract_market_symbols(
+def extract_usdt_market_symbols(
     markets: dict,
 ) -> list[str]:
     """
-    Extract real Nobitex market symbols.
-
-    Current discovery target is the RLS market list
-    used by the local Nobitex account/market endpoint.
+    Extract BASE/USDT markets from Nobitex.
 
     Examples:
-        BTC-rls  -> BTCIRT
-        ETH-rls  -> ETHIRT
-        USDT-rls -> USDTIRT
+
+        btc-usdt  -> BTCUSDT
+        eth-usdt  -> ETHUSDT
+        sol-usdt  -> SOLUSDT
+
+    USDT is the primary analysis quote.
     """
 
     stats = markets.get(
@@ -105,24 +87,24 @@ def extract_market_symbols(
     symbols: set[str] = set()
 
     for market_key in stats:
-        if not market_key.endswith(
-            "-rls"
-        ):
-            continue
-
-        source_symbol = (
-            market_key[:-4]
+        key = (
+            str(market_key)
             .strip()
             .upper()
         )
 
-        if not source_symbol:
+        if not key.endswith(
+            "-USDT"
+        ):
+            continue
+
+        base = key[:-5].strip()
+
+        if not base:
             continue
 
         symbols.add(
-            normalize_market_symbol(
-                source_symbol
-            )
+            f"{base}USDT"
         )
 
     return sorted(symbols)
@@ -131,22 +113,6 @@ def extract_market_symbols(
 def decode_public_candle(
     message: str,
 ) -> dict | None:
-    """
-    Decode one Nobitex public candle message.
-
-    Returns:
-
-        {
-            "market_symbol": "BTCIRT",
-            "symbol": "BTC",
-            "resolution": "60",
-            "candle": Candle(...)
-        }
-
-    MarketRegistry remains the authoritative source for
-    base/quote/analysis/execution market identity.
-    """
-
     if not message:
         return None
 
@@ -164,7 +130,10 @@ def decode_public_candle(
         return None
 
     channel = str(
-        push.get("channel", "")
+        push.get(
+            "channel",
+            "",
+        )
     )
 
     if not channel.startswith(
@@ -193,7 +162,10 @@ def decode_public_candle(
     try:
         parts = channel.split("-")
 
-        market_symbol = parts[1]
+        market_symbol = (
+            parts[1].strip().upper()
+        )
+
         resolution = parts[2]
 
         candle = Candle(
@@ -213,6 +185,11 @@ def decode_public_candle(
     ):
         return None
 
+    if not market_symbol.endswith(
+        "USDT"
+    ):
+        return None
+
     return {
         "market_symbol": market_symbol,
         "symbol": project_symbol(
@@ -225,45 +202,16 @@ def decode_public_candle(
 
 class PublicCandleCapture:
     """
-    Continuous Nobitex public candle capture.
+    Continuous USDT candle capture.
 
-    Responsibilities:
+    USDT is the primary analysis quote.
 
-        WebSocket
-            ↓
-        market symbol
-            ↓
-        MarketRegistry
-            ↓
-        CandleStore
+    IRT is intentionally not subscribed here because:
+        247 USDT channels + 248 IRT channels > 300
+        channels per connection.
 
-    MarketRegistry is the authority for:
-        - BASE
-        - QUOTE
-        - analysis market
-        - execution market
-
-    CandleStore stores the actual market symbol.
-
-    Examples:
-
-        BTCIRT
-            BASE=BTC
-            QUOTE=IRT
-            ANALYSIS=BTCUSDT
-            EXECUTION=BTCIRT
-
-        BTCUSDT
-            BASE=BTC
-            QUOTE=USDT
-            ANALYSIS=BTCUSDT
-            EXECUTION=BTCUSDT
-
-        USDTIRT
-            BASE=USDT
-            QUOTE=IRT
-            ANALYSIS=USDTIRT
-            EXECUTION=USDTIRT
+    IRT remains the execution market and will be
+    handled by a separate execution-data path.
     """
 
     def __init__(
@@ -299,10 +247,12 @@ class PublicCandleCapture:
             }
         )
 
-        if not unique_symbols:
-            raise ValueError(
-                "No valid symbols were provided."
-            )
+        for symbol in unique_symbols:
+            if not symbol.endswith("USDT"):
+                raise ValueError(
+                    "All capture symbols must be "
+                    "BASEUSDT markets."
+                )
 
         if len(unique_symbols) > MAX_CHANNELS:
             raise ValueError(
@@ -456,10 +406,8 @@ class PublicCandleCapture:
 
             return
 
-        candle_data = (
-            decode_public_candle(
-                message
-            )
+        candle_data = decode_public_candle(
+            message
         )
 
         if candle_data is None:
@@ -468,22 +416,14 @@ class PublicCandleCapture:
         self.received_count += 1
 
         market_symbol = (
-            candle_data[
-                "market_symbol"
-            ]
+            candle_data["market_symbol"]
         )
 
-        symbol = candle_data[
-            "symbol"
-        ]
+        resolution = (
+            candle_data["resolution"]
+        )
 
-        resolution = candle_data[
-            "resolution"
-        ]
-
-        candle = candle_data[
-            "candle"
-        ]
+        candle = candle_data["candle"]
 
         try:
             descriptor = (
@@ -497,8 +437,7 @@ class PublicCandleCapture:
 
             print(
                 f"[REGISTRY ERROR] "
-                f"{market_symbol}: "
-                f"{exc}"
+                f"{market_symbol}: {exc}"
             )
 
             return
@@ -521,8 +460,7 @@ class PublicCandleCapture:
 
             print(
                 f"[STORE ERROR] "
-                f"{market_symbol}: "
-                f"{exc}"
+                f"{market_symbol}: {exc}"
             )
 
             return
@@ -605,18 +543,15 @@ class PublicCandleCapture:
         )
 
         print(
-            "[START] Nobitex public candle "
-            "capture"
+            "[START] Nobitex USDT candle capture"
         )
 
         print(
-            f"[MARKETS] "
-            f"{len(self.symbols)}"
+            f"[MARKETS] {len(self.symbols)}"
         )
 
         print(
-            f"[TIMEFRAME] "
-            f"{self.resolution}"
+            f"[TIMEFRAME] {self.resolution}"
         )
 
         print(
@@ -630,10 +565,6 @@ class PublicCandleCapture:
             try:
                 self._run_once()
 
-                # A clean connection cycle means the
-                # WebSocket completed normally. Reset
-                # the exponential backoff so the next
-                # reconnect starts quickly.
                 reconnect_delay = (
                     self.reconnect_initial_delay
                 )
@@ -669,7 +600,6 @@ class PublicCandleCapture:
                 time.sleep(
                     reconnect_delay
                 )
-
             except KeyboardInterrupt:
                 self.stop()
                 break
@@ -716,26 +646,26 @@ def build_capture_from_nobitex(
 
     markets = market_service.markets()
 
-    symbols = extract_market_symbols(
+    symbols = extract_usdt_market_symbols(
         markets
     )
 
     if not symbols:
         raise RuntimeError(
-            "No Nobitex markets were returned."
+            "No USDT Nobitex markets were returned."
         )
 
     if len(symbols) > MAX_CHANNELS:
         raise RuntimeError(
             f"Nobitex returned "
-            f"{len(symbols)} markets, "
+            f"{len(symbols)} USDT markets, "
             f"but one WebSocket connection "
             f"supports at most "
             f"{MAX_CHANNELS} channels."
         )
 
     print(
-        f"[MARKETS DISCOVERED] "
+        f"[USDT MARKETS DISCOVERED] "
         f"{len(symbols)}"
     )
 
