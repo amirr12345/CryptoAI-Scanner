@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from microstructure.confluence_engine import ConfluenceEngine
+from microstructure.confluence_engine import (
+    ConfluenceEngine,
+)
 from microstructure.historical_confluence import (
     HistoricalConfluenceEngine,
 )
@@ -21,8 +23,15 @@ from microstructure.structure_break import (
 from microstructure.structure_setup import (
     StructureSetupEngine,
 )
-from models.confluence_result import ConfluenceResult
-from models.structure_setup import StructureSetup
+from models.confluence_result import (
+    ConfluenceResult,
+)
+from models.structure_setup import (
+    StructureSetup,
+)
+from services.live_data_freshness import (
+    LiveDataFreshness,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,33 +41,15 @@ class LiveConfluenceResult:
     """
 
     symbol: str
-
     setup: StructureSetup | None
-
     confluence: ConfluenceResult | None
-
     status: str
-
     reason: str
 
 
 class LiveConfluenceService:
     """
-    Orchestrate the existing microstructure engines.
-
-    Pipeline:
-
-        MarketStructure
-            ↓
-        StructureBreak
-            ↓
-        LiquiditySweep
-            ↓
-        StructureSetup
-            ↓
-        HistoricalContext
-            ↓
-        HistoricalConfluence
+    Orchestrate the live structure/confluence pipeline.
     """
 
     def __init__(
@@ -68,7 +59,10 @@ class LiveConfluenceService:
         liquidity_sweep_engine: LiquiditySweepEngine | None = None,
         structure_setup_engine: StructureSetupEngine | None = None,
         historical_context_engine: HistoricalContextEngine | None = None,
-        historical_confluence_engine: HistoricalConfluenceEngine | None = None,
+        historical_confluence_engine: (
+            HistoricalConfluenceEngine | None
+        ) = None,
+        freshness_checker: LiveDataFreshness | None = None,
     ) -> None:
         self.market_structure = (
             market_structure_engine
@@ -108,10 +102,19 @@ class LiveConfluenceService:
             )
         )
 
+        self.freshness = (
+            freshness_checker
+            if freshness_checker is not None
+            else LiveDataFreshness(
+                max_candle_lag_seconds=300
+            )
+        )
+
     def evaluate(
         self,
         symbol: str,
         candles,
+        latest_trade_timestamp: int | None = None,
         swing_window: int = 2,
         displacement_pct: float = 0.15,
         max_bars_after_sweep: int = 10,
@@ -120,12 +123,11 @@ class LiveConfluenceService:
         """
         Run complete live analysis for one symbol.
 
-        The latest valid StructureSetup is selected.
+        `latest_trade_timestamp` is optional. When provided,
+        it is used directly by the freshness gate.
 
-        Historical Context is evaluated using that setup's
-        own timestamp.
-
-        No current/future trade context is injected manually.
+        This keeps the freshness layer independent from the
+        HistoricalContextEngine storage implementation.
         """
 
         normalized_symbol = (
@@ -142,7 +144,48 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 1. Market Structure
+        # 0. DATA FRESHNESS
+        # --------------------------------------------------
+
+        try:
+            latest_candle_timestamp = int(
+                candles[-1].timestamp
+            )
+
+            freshness = self.freshness.check(
+                latest_candle_timestamp=(
+                    latest_candle_timestamp
+                ),
+                latest_trade_timestamp=(
+                    latest_trade_timestamp
+                ),
+            )
+
+        except Exception as exc:
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=None,
+                confluence=None,
+                status="FRESHNESS_CHECK_ERROR",
+                reason=str(exc),
+            )
+
+        if not freshness.fresh:
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=None,
+                confluence=None,
+                status="STALE_CANDLES",
+                reason=(
+                    "Latest candle is stale: "
+                    f"{freshness.candle_lag_seconds}s "
+                    f"> "
+                    f"{freshness.max_allowed_lag_seconds}s."
+                ),
+            )
+
+        # --------------------------------------------------
+        # 1. MARKET STRUCTURE
         # --------------------------------------------------
 
         structure = self.market_structure.calculate(
@@ -156,11 +199,13 @@ class LiveConfluenceService:
                 setup=None,
                 confluence=None,
                 status="NO_STRUCTURE",
-                reason="No confirmed market structure swings.",
+                reason=(
+                    "No confirmed market structure swings."
+                ),
             )
 
         # --------------------------------------------------
-        # 2. Structure Break
+        # 2. STRUCTURE BREAK
         # --------------------------------------------------
 
         structure_breaks = (
@@ -177,11 +222,13 @@ class LiveConfluenceService:
                 setup=None,
                 confluence=None,
                 status="NO_STRUCTURE_BREAK",
-                reason="No structure-break events were detected.",
+                reason=(
+                    "No structure-break events were detected."
+                ),
             )
 
         # --------------------------------------------------
-        # 3. Liquidity Sweep
+        # 3. LIQUIDITY SWEEP
         # --------------------------------------------------
 
         sweeps = self.liquidity_sweep.calculate(
@@ -195,17 +242,23 @@ class LiveConfluenceService:
                 setup=None,
                 confluence=None,
                 status="NO_LIQUIDITY_SWEEP",
-                reason="No confirmed liquidity sweep was detected.",
+                reason=(
+                    "No confirmed liquidity sweep was detected."
+                ),
             )
 
         # --------------------------------------------------
-        # 4. Structure Setup
+        # 4. STRUCTURE SETUP
         # --------------------------------------------------
 
         setups = self.structure_setup.calculate(
             sweeps=sweeps.events,
-            structure_breaks=structure_breaks.events,
-            max_bars_after_sweep=max_bars_after_sweep,
+            structure_breaks=(
+                structure_breaks.events
+            ),
+            max_bars_after_sweep=(
+                max_bars_after_sweep
+            ),
         )
 
         if not setups.setups:
@@ -215,27 +268,34 @@ class LiveConfluenceService:
                 confluence=None,
                 status="NO_STRUCTURE_SETUP",
                 reason=(
-                    "No valid Sweep + MSS structure setup was detected."
+                    "No valid Sweep + MSS "
+                    "structure setup was detected."
                 ),
             )
 
         latest_setup = max(
             setups.setups,
             key=lambda item: (
-                item.timestamp,
-                item.index,
+                int(item.timestamp),
+                int(item.index),
             ),
         )
 
         # --------------------------------------------------
-        # 5. Historical Context
+        # 5. HISTORICAL CONTEXT
         # --------------------------------------------------
 
         try:
-            context = self.historical_context.calculate(
-                symbol=normalized_symbol,
-                timestamp=int(latest_setup.timestamp),
-                lookback_seconds=lookback_seconds,
+            context = (
+                self.historical_context.calculate(
+                    symbol=normalized_symbol,
+                    timestamp=int(
+                        latest_setup.timestamp
+                    ),
+                    lookback_seconds=(
+                        lookback_seconds
+                    ),
+                )
             )
 
         except ValueError as exc:
@@ -257,7 +317,7 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 6. Historical Confluence
+        # 6. HISTORICAL CONFLUENCE
         # --------------------------------------------------
 
         try:
@@ -282,5 +342,8 @@ class LiveConfluenceService:
             setup=latest_setup,
             confluence=confluence,
             status="EVALUATED",
-            reason="Live historical confluence evaluated successfully.",
+            reason=(
+                "Live historical confluence "
+                "evaluated successfully."
+            ),
         )

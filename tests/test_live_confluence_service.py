@@ -1,10 +1,17 @@
 from dataclasses import dataclass
 
-from models.historical_context import HistoricalContext
-from models.structure_setup import StructureSetup
+from models.historical_context import (
+    HistoricalContext,
+)
+from models.structure_setup import (
+    StructureSetup,
+)
 from services.live_confluence_service import (
     LiveConfluenceResult,
     LiveConfluenceService,
+)
+from services.live_data_freshness import (
+    DataFreshnessResult,
 )
 
 
@@ -16,6 +23,17 @@ class FakeEngine:
         return self.result
 
     def evaluate(self, **kwargs):
+        return self.result
+
+
+class FakeFreshnessChecker:
+    def __init__(
+        self,
+        result: DataFreshnessResult,
+    ) -> None:
+        self.result = result
+
+    def check(self, **kwargs):
         return self.result
 
 
@@ -98,10 +116,50 @@ def make_confluence():
 
 def make_candles():
     return [
-        object(),
-        object(),
-        object(),
+        type(
+            "Candle",
+            (),
+            {
+                "timestamp": 1000,
+            },
+        )(),
+        type(
+            "Candle",
+            (),
+            {
+                "timestamp": 1000,
+            },
+        )(),
+        type(
+            "Candle",
+            (),
+            {
+                "timestamp": 1000,
+            },
+        )(),
     ]
+
+
+def fresh_result() -> DataFreshnessResult:
+    return DataFreshnessResult(
+        latest_candle_timestamp=1000,
+        latest_trade_timestamp=1300,
+        candle_lag_seconds=300,
+        max_allowed_lag_seconds=300,
+        fresh=True,
+        status="FRESH",
+    )
+
+
+def stale_result() -> DataFreshnessResult:
+    return DataFreshnessResult(
+        latest_candle_timestamp=1000,
+        latest_trade_timestamp=1301,
+        candle_lag_seconds=301,
+        max_allowed_lag_seconds=300,
+        fresh=False,
+        status="STALE_CANDLES",
+    )
 
 
 def test_no_candles():
@@ -120,7 +178,40 @@ def test_no_candles():
     assert result.status == "NO_CANDLES"
 
 
-def test_no_structure():
+def test_stale_candles_stop_pipeline():
+    structure = type(
+        "Structure",
+        (),
+        {
+            "swings": [object()],
+        },
+    )()
+
+    service = LiveConfluenceService(
+        market_structure_engine=FakeEngine(
+            result=structure,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            stale_result(),
+        ),
+    )
+
+    result = service.evaluate(
+        symbol="BTC",
+        candles=make_candles(),
+    )
+
+    assert result.status == "STALE_CANDLES"
+    assert result.setup is None
+    assert result.confluence is None
+
+    assert (
+        "301s > 300s"
+        in result.reason
+    )
+
+
+def test_fresh_data_allows_structure_analysis():
     structure = type(
         "Structure",
         (),
@@ -131,8 +222,11 @@ def test_no_structure():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
-        )
+            result=structure,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
+        ),
     )
 
     result = service.evaluate(
@@ -162,10 +256,13 @@ def test_no_structure_break():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
+            result=structure,
         ),
         structure_break_engine=FakeEngine(
-            result=breaks
+            result=breaks,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
         ),
     )
 
@@ -204,13 +301,16 @@ def test_no_liquidity_sweep():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
+            result=structure,
         ),
         structure_break_engine=FakeEngine(
-            result=breaks
+            result=breaks,
         ),
         liquidity_sweep_engine=FakeEngine(
-            result=sweeps
+            result=sweeps,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
         ),
     )
 
@@ -257,16 +357,19 @@ def test_no_structure_setup():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
+            result=structure,
         ),
         structure_break_engine=FakeEngine(
-            result=breaks
+            result=breaks,
         ),
         liquidity_sweep_engine=FakeEngine(
-            result=sweeps
+            result=sweeps,
         ),
         structure_setup_engine=FakeEngine(
-            result=setups
+            result=setups,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
         ),
     )
 
@@ -315,26 +418,28 @@ def test_no_historical_data():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
+            result=structure,
         ),
         structure_break_engine=FakeEngine(
-            result=breaks
+            result=breaks,
         ),
         liquidity_sweep_engine=FakeEngine(
-            result=sweeps
+            result=sweeps,
         ),
         structure_setup_engine=FakeEngine(
-            result=setups
+            result=setups,
         ),
         historical_context_engine=FakeEngine(
-            result=None
+            result=None,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
         ),
     )
 
     service.historical_context.calculate = (
         lambda **kwargs: (
-            _
-            for _ in ()
+            _ for _ in ()
         ).throw(
             ValueError(
                 "No historical trades available."
@@ -345,6 +450,7 @@ def test_no_historical_data():
     result = service.evaluate(
         symbol="BTC",
         candles=make_candles(),
+        latest_trade_timestamp=1300,
     )
 
     assert result.status == "NO_HISTORICAL_DATA"
@@ -392,28 +498,32 @@ def test_full_pipeline_evaluates():
 
     service = LiveConfluenceService(
         market_structure_engine=FakeEngine(
-            result=structure
+            result=structure,
         ),
         structure_break_engine=FakeEngine(
-            result=breaks
+            result=breaks,
         ),
         liquidity_sweep_engine=FakeEngine(
-            result=sweeps
+            result=sweeps,
         ),
         structure_setup_engine=FakeEngine(
-            result=setups
+            result=setups,
         ),
         historical_context_engine=FakeEngine(
-            result=context
+            result=context,
         ),
         historical_confluence_engine=FakeEngine(
-            result=confluence
+            result=confluence,
+        ),
+        freshness_checker=FakeFreshnessChecker(
+            fresh_result(),
         ),
     )
 
     result = service.evaluate(
         symbol="BTC",
         candles=make_candles(),
+        latest_trade_timestamp=1300,
     )
 
     assert result.status == "EVALUATED"
