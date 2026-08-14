@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 
 from core.candle_store import CandleStore
+from core.market_registry import (
+    MarketRegistry,
+)
 from models.candle import Candle
 from tools.capture_public_candles import (
     MAX_CHANNELS,
@@ -86,8 +89,13 @@ def test_project_symbol():
     )
 
     assert (
-        project_symbol("BTC")
+        project_symbol("BTCUSDT")
         == "BTC"
+    )
+
+    assert (
+        project_symbol("USDTIRT")
+        == "USDT"
     )
 
 
@@ -135,9 +143,20 @@ def test_decode_valid_candle():
 
     assert result is not None
 
-    assert result["market_symbol"] == "BTCIRT"
-    assert result["symbol"] == "BTC"
-    assert result["resolution"] == "60"
+    assert (
+        result["market_symbol"]
+        == "BTCIRT"
+    )
+
+    assert (
+        result["symbol"]
+        == "BTC"
+    )
+
+    assert (
+        result["resolution"]
+        == "60"
+    )
 
     candle = result["candle"]
 
@@ -149,9 +168,51 @@ def test_decode_valid_candle():
     assert candle.volume == 20.0
 
 
+def test_decode_valid_usdt_market():
+    result = decode_public_candle(
+        make_message(
+            symbol="BTCUSDT"
+        )
+    )
+
+    assert result is not None
+
+    assert (
+        result["market_symbol"]
+        == "BTCUSDT"
+    )
+
+    assert (
+        result["symbol"]
+        == "BTC"
+    )
+
+
+def test_decode_valid_usdt_irt_bridge():
+    result = decode_public_candle(
+        make_message(
+            symbol="USDTIRT"
+        )
+    )
+
+    assert result is not None
+
+    assert (
+        result["market_symbol"]
+        == "USDTIRT"
+    )
+
+    assert (
+        result["symbol"]
+        == "USDT"
+    )
+
+
 def test_decode_invalid_json():
     assert (
-        decode_public_candle("not-json")
+        decode_public_candle(
+            "not-json"
+        )
         is None
     )
 
@@ -197,10 +258,13 @@ def test_capture_saves_candle(
         tmp_path / "crypto.db"
     )
 
+    registry = MarketRegistry()
+
     capture = PublicCandleCapture(
         symbols=["BTCIRT"],
         resolution="60",
         candle_store=store,
+        market_registry=registry,
     )
 
     capture.on_message(
@@ -212,11 +276,18 @@ def test_capture_saves_candle(
         ),
     )
 
-    assert capture.received_count == 1
-    assert capture.saved_count == 1
+    assert (
+        capture.received_count
+        == 1
+    )
+
+    assert (
+        capture.saved_count
+        == 1
+    )
 
     candle = store.get(
-        symbol="BTC",
+        symbol="BTCIRT",
         timestamp=1000,
         timeframe="60",
     )
@@ -224,6 +295,28 @@ def test_capture_saves_candle(
     assert candle is not None
     assert candle.close == 105.0
     assert candle.volume == 20.0
+
+    descriptor = registry.get(
+        "BTCIRT"
+    )
+
+    assert descriptor is not None
+    assert (
+        descriptor.base_asset
+        == "BTC"
+    )
+    assert (
+        descriptor.quote_asset
+        == "IRT"
+    )
+    assert (
+        descriptor.analysis_market
+        == "BTCUSDT"
+    )
+    assert (
+        descriptor.execution_market
+        == "BTCIRT"
+    )
 
 
 def test_duplicate_updates_are_upserted(
@@ -233,10 +326,13 @@ def test_duplicate_updates_are_upserted(
         tmp_path / "crypto.db"
     )
 
+    registry = MarketRegistry()
+
     capture = PublicCandleCapture(
         symbols=["BTCIRT"],
         resolution="60",
         candle_store=store,
+        market_registry=registry,
     )
 
     capture.on_message(
@@ -257,16 +353,23 @@ def test_duplicate_updates_are_upserted(
         ),
     )
 
-    assert capture.received_count == 2
-    assert capture.saved_count == 2
+    assert (
+        capture.received_count
+        == 2
+    )
 
     assert (
-        store.count("BTC")
+        capture.saved_count
+        == 2
+    )
+
+    assert (
+        store.count("BTCIRT")
         == 1
     )
 
     candle = store.get(
-        symbol="BTC",
+        symbol="BTCIRT",
         timestamp=1000,
         timeframe="60",
     )
@@ -304,8 +407,107 @@ def test_multiple_timestamps(
         )
 
     assert (
-        store.count("BTC")
+        store.count("BTCIRT")
         == 3
+    )
+
+
+def test_different_markets_have_separate_registry_identity(
+    tmp_path,
+):
+    store = CandleStore(
+        tmp_path / "crypto.db"
+    )
+
+    registry = MarketRegistry()
+
+    capture = PublicCandleCapture(
+        symbols=[
+            "BTCIRT",
+            "BTCUSDT",
+            "USDTIRT",
+        ],
+        resolution="60",
+        candle_store=store,
+        market_registry=registry,
+    )
+
+    capture.on_message(
+        None,
+        make_message(
+            symbol="BTCIRT",
+            timestamp=1000,
+            close=11_830_000_000,
+        ),
+    )
+
+    capture.on_message(
+        None,
+        make_message(
+            symbol="BTCUSDT",
+            timestamp=1000,
+            close=63_000,
+        ),
+    )
+
+    capture.on_message(
+        None,
+        make_message(
+            symbol="USDTIRT",
+            timestamp=1000,
+            close=187_000,
+        ),
+    )
+
+    assert (
+        store.count("BTCIRT")
+        == 1
+    )
+
+    assert (
+        store.count("BTCUSDT")
+        == 1
+    )
+
+    assert (
+        store.count("USDTIRT")
+        == 1
+    )
+
+    btc_irt = registry.require(
+        "BTCIRT"
+    )
+
+    btc_usdt = registry.require(
+        "BTCUSDT"
+    )
+
+    bridge = registry.require(
+        "USDTIRT"
+    )
+
+    assert btc_irt.analysis_market == (
+        "BTCUSDT"
+    )
+
+    assert btc_irt.execution_market == (
+        "BTCIRT"
+    )
+
+    assert btc_usdt.analysis_market == (
+        "BTCUSDT"
+    )
+
+    assert btc_usdt.execution_market == (
+        "BTCUSDT"
+    )
+
+    assert bridge.analysis_market == (
+        "USDTIRT"
+    )
+
+    assert bridge.execution_market == (
+        "USDTIRT"
     )
 
 
@@ -333,94 +535,34 @@ def test_max_channel_limit():
         )
 
 
-def test_canonical_symbols_are_stored(
-    tmp_path,
-):
-    store = CandleStore(
-        tmp_path / "crypto.db"
-    )
-
-    capture = PublicCandleCapture(
-        symbols=["BTCIRT"],
-        resolution="60",
-        candle_store=store,
-    )
-
-    capture.on_message(
-        None,
-        make_message(
-            symbol="BTCIRT",
-            timestamp=1000,
-        ),
-    )
-
-    assert (
-        store.count("BTC")
-        == 1
-    )
-
-    assert (
-        store.count("BTCIRT")
-        == 1
-    )
-
-
-def test_different_symbols_are_stored_separately(
-    tmp_path,
-):
-    store = CandleStore(
-        tmp_path / "crypto.db"
-    )
+def test_market_descriptors_are_registered():
+    registry = MarketRegistry()
 
     capture = PublicCandleCapture(
         symbols=[
             "BTCIRT",
             "ETHIRT",
+            "USDTIRT",
         ],
         resolution="60",
-        candle_store=store,
+        market_registry=registry,
     )
 
-    capture.on_message(
-        None,
-        make_message(
-            symbol="BTCIRT",
-            timestamp=1000,
-            close=105.0,
-        ),
-    )
+    assert len(
+        capture.market_descriptors
+    ) == 3
 
-    capture.on_message(
-        None,
-        make_message(
-            symbol="ETHIRT",
-            timestamp=1000,
-            close=205.0,
-        ),
+    assert (
+        registry.get("BTCIRT")
+        is not None
     )
 
     assert (
-        store.count("BTC")
-        == 1
+        registry.get("ETHIRT")
+        is not None
     )
 
     assert (
-        store.count("ETH")
-        == 1
+        registry.get("USDTIRT")
+        is not None
     )
-
-    btc = store.get(
-        symbol="BTC",
-        timestamp=1000,
-    )
-
-    eth = store.get(
-        symbol="ETH",
-        timestamp=1000,
-    )
-
-    assert btc is not None
-    assert eth is not None
-
-    assert btc.close == 105.0
-    assert eth.close == 205.0
