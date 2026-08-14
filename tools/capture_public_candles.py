@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.candle_store import CandleStore
 from models.candle import Candle
+from services.market_service import MarketService
 
 
 WS_URL = "wss://ws.nobitex.ir/connection/websocket"
@@ -36,13 +37,62 @@ def normalize_market_symbol(
     return f"{value}IRT"
 
 
+def project_symbol(
+    market_symbol: str,
+) -> str:
+    value = market_symbol.strip().upper()
+
+    if value.endswith("IRT"):
+        return value[:-3]
+
+    return value
+
+
+def extract_market_symbols(
+    markets: dict,
+) -> list[str]:
+    """
+    Extract available RLS markets from Nobitex
+    market stats response.
+
+    Example:
+        BTC-rls -> BTCIRT
+    """
+
+    stats = markets.get(
+        "stats",
+        {},
+    )
+
+    symbols: set[str] = set()
+
+    for market_key in stats:
+        if not market_key.endswith(
+            "-rls"
+        ):
+            continue
+
+        source_symbol = (
+            market_key[:-4]
+            .strip()
+            .upper()
+        )
+
+        if not source_symbol:
+            continue
+
+        symbols.add(
+            normalize_market_symbol(
+                source_symbol
+            )
+        )
+
+    return sorted(symbols)
+
+
 def decode_public_candle(
     message: str,
 ) -> dict | None:
-    """
-    Decode one Nobitex public candle WebSocket message.
-    """
-
     if not message:
         return None
 
@@ -110,7 +160,10 @@ def decode_public_candle(
         return None
 
     return {
-        "symbol": market_symbol,
+        "market_symbol": market_symbol,
+        "symbol": project_symbol(
+            market_symbol
+        ),
         "resolution": resolution,
         "candle": candle,
     }
@@ -118,12 +171,8 @@ def decode_public_candle(
 
 class PublicCandleCapture:
     """
-    Capture public OHLCV candles from Nobitex WebSocket
-    and persist them through CandleStore.
-
-    Repeated updates for the same
-    (symbol, timeframe, timestamp) are handled by
-    CandleStore UPSERT logic.
+    Capture public OHLCV candles for the complete
+    available Nobitex market list.
     """
 
     def __init__(
@@ -144,7 +193,9 @@ class PublicCandleCapture:
 
         unique_symbols = sorted(
             {
-                normalize_market_symbol(symbol)
+                normalize_market_symbol(
+                    symbol
+                )
                 for symbol in symbols
                 if symbol.strip()
             }
@@ -162,7 +213,9 @@ class PublicCandleCapture:
             )
 
         self.symbols = unique_symbols
-        self.resolution = str(resolution)
+        self.resolution = str(
+            resolution
+        )
 
         self.candle_store = (
             candle_store
@@ -174,6 +227,7 @@ class PublicCandleCapture:
 
         self.received_count = 0
         self.saved_count = 0
+        self.error_count = 0
 
     def on_open(
         self,
@@ -229,7 +283,9 @@ class PublicCandleCapture:
             return
 
         candle_data = (
-            decode_public_candle(message)
+            decode_public_candle(
+                message
+            )
         )
 
         if candle_data is None:
@@ -238,7 +294,9 @@ class PublicCandleCapture:
         self.received_count += 1
 
         symbol = candle_data["symbol"]
-        resolution = candle_data["resolution"]
+        resolution = candle_data[
+            "resolution"
+        ]
         candle = candle_data["candle"]
 
         try:
@@ -251,15 +309,17 @@ class PublicCandleCapture:
             self.saved_count += 1
 
         except Exception as exc:
+            self.error_count += 1
+
             print(
-                f"CandleStore error for "
+                f"CandleStore error "
                 f"{symbol}: {exc}"
             )
 
             return
 
         print(
-            f"{symbol:<12} "
+            f"{symbol:<14} "
             f"TF={resolution:<4} "
             f"TS={candle.timestamp} "
             f"O={candle.open:.8f} "
@@ -274,6 +334,8 @@ class PublicCandleCapture:
         ws,
         error,
     ) -> None:
+        self.error_count += 1
+
         print(
             f"WebSocket error: {error}"
         )
@@ -300,9 +362,22 @@ class PublicCandleCapture:
             f"{self.saved_count}"
         )
 
+        print(
+            f"Errors: "
+            f"{self.error_count}"
+        )
+
     def run(self) -> None:
         print(
             "Starting Nobitex public candle capture..."
+        )
+
+        print(
+            f"Markets: {len(self.symbols)}"
+        )
+
+        print(
+            f"Resolution: {self.resolution}"
         )
 
         self.ws = websocket.WebSocketApp(
@@ -319,18 +394,48 @@ class PublicCandleCapture:
         )
 
 
-def main() -> None:
-    symbols = [
-        "BTC",
-        "ETH",
-        "USDT",
-        "BICO",
-        "2Z",
-    ]
+def build_capture_from_nobitex(
+    resolution: str = "60",
+    candle_store: CandleStore | None = None,
+) -> PublicCandleCapture:
+    market_service = MarketService()
 
-    capture = PublicCandleCapture(
+    markets = market_service.markets()
+
+    symbols = extract_market_symbols(
+        markets
+    )
+
+    if not symbols:
+        raise RuntimeError(
+            "No Nobitex markets were returned."
+        )
+
+    print(
+        f"Available markets: {len(symbols)}"
+    )
+
+    if len(symbols) > MAX_CHANNELS:
+        raise RuntimeError(
+            f"Nobitex returned "
+            f"{len(symbols)} markets, "
+            f"but one WebSocket connection "
+            f"supports at most "
+            f"{MAX_CHANNELS} channels."
+        )
+
+    return PublicCandleCapture(
         symbols=symbols,
-        resolution="60",
+        resolution=resolution,
+        candle_store=candle_store,
+    )
+
+
+def main() -> None:
+    capture = (
+        build_capture_from_nobitex(
+            resolution="60"
+        )
     )
 
     capture.run()
