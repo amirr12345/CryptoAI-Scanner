@@ -13,12 +13,18 @@ class CandleStore:
     """
     Persistent storage for live OHLCV candles.
 
-    Unique key:
+    Canonical symbol format:
+        BTC
+        ETH
+        USDT
 
+    Exchange market symbols such as BTCIRT are normalized to BTC.
+
+    Unique key:
         (symbol, timeframe, timestamp)
 
-    Repeated WebSocket updates for the same candle update
-    the existing row instead of creating duplicates.
+    Repeated WebSocket updates for the same candle update the
+    existing row instead of creating duplicates.
     """
 
     def __init__(
@@ -33,6 +39,33 @@ class CandleStore:
         )
 
         self._create_table()
+
+    @staticmethod
+    def normalize_symbol(
+        symbol: str,
+    ) -> str:
+        """
+        Convert exchange market symbol to project symbol.
+
+        Examples:
+            BTCIRT -> BTC
+            ETHIRT -> ETH
+            USDTIRT -> USDT
+            BTCUSDT -> BTCUSDT
+            BTC    -> BTC
+        """
+
+        value = symbol.strip().upper()
+
+        if not value:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
+
+        if value.endswith("IRT"):
+            return value[:-3]
+
+        return value
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -92,19 +125,12 @@ class CandleStore:
         timeframe: str = "60",
     ) -> bool:
         """
-        Insert or update one candle.
-
-        Symbol belongs to the storage record, not the Candle model.
+        Insert or update one live candle.
         """
 
-        normalized_symbol = (
-            symbol.strip().upper()
+        normalized_symbol = self.normalize_symbol(
+            symbol
         )
-
-        if not normalized_symbol:
-            raise ValueError(
-                "Symbol cannot be empty."
-            )
 
         if not timeframe:
             raise ValueError(
@@ -159,12 +185,8 @@ class CandleStore:
         timestamp: int,
         timeframe: str = "60",
     ) -> Candle | None:
-        """
-        Return one candle by unique key.
-        """
-
         normalized_symbol = (
-            symbol.strip().upper()
+            self.normalize_symbol(symbol)
         )
 
         with self._connect() as connection:
@@ -207,12 +229,8 @@ class CandleStore:
         symbol: str,
         timeframe: str = "60",
     ) -> Candle | None:
-        """
-        Return the latest stored candle.
-        """
-
         normalized_symbol = (
-            symbol.strip().upper()
+            self.normalize_symbol(symbol)
         )
 
         with self._connect() as connection:
@@ -255,17 +273,13 @@ class CandleStore:
         timeframe: str = "60",
         limit: int = 200,
     ) -> list[Candle]:
-        """
-        Return recent candles in chronological order.
-        """
-
         if limit <= 0:
             raise ValueError(
                 "limit must be greater than zero."
             )
 
         normalized_symbol = (
-            symbol.strip().upper()
+            self.normalize_symbol(symbol)
         )
 
         with self._connect() as connection:
@@ -310,10 +324,6 @@ class CandleStore:
         symbol: str | None = None,
         timeframe: str = "60",
     ) -> int:
-        """
-        Return stored candle count.
-        """
-
         with self._connect() as connection:
             if symbol is None:
                 row = connection.execute(
@@ -328,6 +338,10 @@ class CandleStore:
                 ).fetchone()
 
             else:
+                normalized_symbol = (
+                    self.normalize_symbol(symbol)
+                )
+
                 row = connection.execute(
                     """
                     SELECT COUNT(*)
@@ -336,7 +350,7 @@ class CandleStore:
                       AND timeframe = ?
                     """,
                     (
-                        symbol.strip().upper(),
+                        normalized_symbol,
                         str(timeframe),
                     ),
                 ).fetchone()
@@ -348,9 +362,9 @@ class CandleStore:
         symbol: str,
         timeframe: str = "60",
     ) -> int | None:
-        """
-        Return latest stored candle timestamp.
-        """
+        normalized_symbol = (
+            self.normalize_symbol(symbol)
+        )
 
         with self._connect() as connection:
             row = connection.execute(
@@ -361,7 +375,7 @@ class CandleStore:
                   AND timeframe = ?
                 """,
                 (
-                    symbol.strip().upper(),
+                    normalized_symbol,
                     str(timeframe),
                 ),
             ).fetchone()
