@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -8,11 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-from collections import Counter
-from dataclasses import dataclass
-
 from core.candle_store import CandleStore
+from core.market_registry import (
+    MarketDescriptor,
+    MarketRegistry,
+)
 from core.trade_store import TradeStore
 from services.live_confluence_service import (
     LiveConfluenceResult,
@@ -39,17 +41,21 @@ class ScanSummary:
 
 class LiveScanner:
     """
-    Scan live markets using:
+    Live market scanner with USDT as the analysis reference.
 
-        Live CandleStore
-            ↓
-        REST candle bootstrap
-            ↓
-        LiveConfluenceService
-            ↓
-        Historical Context
-            ↓
-        Confluence
+    Market identity:
+
+        BASE/USDT
+            -> primary analysis market
+
+        BASE/IRT
+            -> local Nobitex execution market
+
+        USDT/IRT
+            -> quote bridge
+
+    The scanner never treats BASE/IRT as the primary
+    analytical identity when a BASE/USDT reference exists.
     """
 
     def __init__(
@@ -58,6 +64,7 @@ class LiveScanner:
         candle_store: CandleStore | None = None,
         trade_store: TradeStore | None = None,
         confluence_service: LiveConfluenceService | None = None,
+        market_registry: MarketRegistry | None = None,
         timeframe: str = "60",
         candle_limit: int = 200,
     ) -> None:
@@ -79,6 +86,12 @@ class LiveScanner:
             else TradeStore()
         )
 
+        self.market_registry = (
+            market_registry
+            if market_registry is not None
+            else MarketRegistry()
+        )
+
         self.confluence_service = (
             confluence_service
             if confluence_service is not None
@@ -94,96 +107,246 @@ class LiveScanner:
     def _extract_symbols(
         markets: dict,
     ) -> list[str]:
+        """
+        Extract BASE assets from the RLS market list.
+
+        Example:
+
+            BTC-rls -> BTC
+            ETH-rls -> ETH
+
+        The scanner subsequently resolves BASE -> BASEUSDT
+        through MarketRegistry.
+        """
+
         stats = markets.get(
             "stats",
             {},
         )
 
-        symbols = {
-            key[:-4].upper()
-            for key in stats
-            if key.endswith("-rls")
-        }
+        symbols: set[str] = set()
+
+        for key in stats:
+            if not key.endswith("-rls"):
+                continue
+
+            symbol = (
+                key[:-4]
+                .strip()
+                .upper()
+            )
+
+            if symbol:
+                symbols.add(symbol)
 
         return sorted(symbols)
+
+    def _resolve_market(
+        self,
+        base_symbol: str,
+    ) -> MarketDescriptor:
+        """
+        Resolve the analytical and execution identity
+        of a BASE asset.
+        """
+
+        base = (
+            base_symbol
+            .strip()
+            .upper()
+        )
+
+        if not base:
+            raise ValueError(
+                "Base symbol cannot be empty."
+            )
+
+        usdt_market = (
+            self.market_registry.usdt_market(
+                base
+            )
+        )
+
+        irt_market = (
+            self.market_registry.irt_market(
+                base
+            )
+        )
+
+        # Prefer the USDT market if it exists in the
+        # discovered registry.
+        usdt_descriptor = (
+            self.market_registry.get(
+                usdt_market
+            )
+        )
+
+        if usdt_descriptor is not None:
+            return usdt_descriptor
+
+        # If BASE/USDT is not in the discovered market set,
+        # keep BASE/IRT as execution while preserving
+        # BASE/USDT as the analytical reference.
+        return MarketDescriptor(
+            market_symbol=irt_market,
+            base_asset=base,
+            quote_asset="IRT",
+            analysis_market=usdt_market,
+            execution_market=irt_market,
+        )
+
+    def _history_symbol(
+        self,
+        descriptor: MarketDescriptor,
+    ) -> str:
+        """
+        Return the market identifier expected by the
+        current MarketService.
+
+        BASEUSDT remains the analytical reference.
+
+        The current scanner uses the same logical market
+        identifier for historical candles.
+        """
+
+        return descriptor.analysis_market
 
     def scan_symbol(
         self,
         symbol: str,
     ) -> LiveConfluenceResult:
-        normalized_symbol = (
-            symbol.strip().upper()
+        """
+        Scan one BASE asset using BASE/USDT as the
+        analytical reference.
+        """
+
+        descriptor = (
+            self._resolve_market(
+                symbol
+            )
         )
 
+        analysis_market = (
+            self._history_symbol(
+                descriptor
+            )
+        )
+
+        # Bootstrap history using the analytical market.
         bootstrap_candles = (
             self.market_service.history(
-                normalized_symbol,
+                analysis_market,
                 resolution=self.timeframe,
                 countback=self.candle_limit,
             )
         )
 
+        # Live candles are also looked up by the analytical
+        # market identifier first.
         latest_trade_timestamp = (
             self.trade_store.latest_timestamp(
-                normalized_symbol
+                descriptor.base_asset
             )
         )
 
-        return self.confluence_service.evaluate(
-            symbol=normalized_symbol,
-            candles=bootstrap_candles,
-            latest_trade_timestamp=(
-                latest_trade_timestamp
-            ),
-            timeframe=self.timeframe,
-            candle_limit=self.candle_limit,
+        result = (
+            self.confluence_service.evaluate(
+                symbol=descriptor.base_asset,
+                candles=bootstrap_candles,
+                latest_trade_timestamp=(
+                    latest_trade_timestamp
+                ),
+                timeframe=self.timeframe,
+                candle_limit=self.candle_limit,
+            )
         )
+
+        return result
 
     def scan(
         self,
         symbols: list[str] | None = None,
     ) -> tuple[
-        list[tuple[str, LiveConfluenceResult]],
+        list[
+            tuple[
+                str,
+                MarketDescriptor,
+                LiveConfluenceResult,
+            ]
+        ],
         ScanSummary,
     ]:
+        """
+        Scan all BASE assets.
+
+        Each result carries:
+            BASE
+            analysis market
+            execution market
+            confluence result
+        """
+
         if symbols is None:
             markets = (
                 self.market_service.markets()
             )
 
-            symbols = self._extract_symbols(
-                markets
+            symbols = (
+                self._extract_symbols(
+                    markets
+                )
             )
 
         results: list[
-            tuple[str, LiveConfluenceResult]
+            tuple[
+                str,
+                MarketDescriptor,
+                LiveConfluenceResult,
+            ]
         ] = []
 
         status_counter = Counter()
         grade_counter = Counter()
 
         for symbol in symbols:
-            normalized_symbol = (
+            base_symbol = (
                 symbol.strip().upper()
             )
 
             try:
-                result = self.scan_symbol(
-                    normalized_symbol
+                descriptor = (
+                    self._resolve_market(
+                        base_symbol
+                    )
+                )
+
+                result = (
+                    self.scan_symbol(
+                        base_symbol
+                    )
                 )
 
             except Exception as exc:
-                result = LiveConfluenceResult(
-                    symbol=normalized_symbol,
-                    setup=None,
-                    confluence=None,
-                    status="ERROR",
-                    reason=str(exc),
+                descriptor = (
+                    self._resolve_market(
+                        base_symbol
+                    )
+                )
+
+                result = (
+                    LiveConfluenceResult(
+                        symbol=base_symbol,
+                        setup=None,
+                        confluence=None,
+                        status="ERROR",
+                        reason=str(exc),
+                    )
                 )
 
             results.append(
                 (
-                    normalized_symbol,
+                    base_symbol,
+                    descriptor,
                     result,
                 )
             )
@@ -193,7 +356,8 @@ class LiveScanner:
             ] += 1
 
             if (
-                result.confluence is not None
+                result.confluence
+                is not None
             ):
                 grade_counter[
                     result.confluence.grade
@@ -250,63 +414,77 @@ class LiveScanner:
 
 def print_results(
     results: list[
-        tuple[str, LiveConfluenceResult]
+        tuple[
+            str,
+            MarketDescriptor,
+            LiveConfluenceResult,
+        ]
     ],
     summary: ScanSummary,
 ) -> None:
     print()
-    print("=" * 120)
-    print("LIVE CONFLUENCE SCANNER")
-    print("=" * 120)
+    print("=" * 150)
+    print("LIVE CONFLUENCE SCANNER - USDT REFERENCE")
+    print("=" * 150)
 
     print(
-        f"Total symbols       : "
+        f"Total BASE assets      : "
         f"{summary.total_symbols}"
     )
+
     print(
-        f"Evaluated           : "
+        f"Evaluated              : "
         f"{summary.evaluated}"
     )
+
     print(
-        f"STALE_CANDLES       : "
+        f"STALE_CANDLES          : "
         f"{summary.stale_candles}"
     )
+
     print(
-        f"NO_CANDLES          : "
+        f"NO_CANDLES             : "
         f"{summary.no_candles}"
     )
+
     print(
-        f"NO_STRUCTURE        : "
+        f"NO_STRUCTURE           : "
         f"{summary.no_structure}"
     )
+
     print(
-        f"NO_STRUCTURE_BREAK  : "
+        f"NO_STRUCTURE_BREAK     : "
         f"{summary.no_structure_break}"
     )
+
     print(
-        f"NO_LIQUIDITY_SWEEP  : "
+        f"NO_LIQUIDITY_SWEEP     : "
         f"{summary.no_liquidity_sweep}"
     )
+
     print(
-        f"NO_STRUCTURE_SETUP  : "
+        f"NO_STRUCTURE_SETUP     : "
         f"{summary.no_structure_setup}"
     )
+
     print(
-        f"NO_HISTORICAL_DATA  : "
+        f"NO_HISTORICAL_DATA     : "
         f"{summary.no_historical_data}"
     )
+
     print(
-        f"INSUFFICIENT_CANDLES: "
+        f"INSUFFICIENT_CANDLES   : "
         f"{summary.insufficient_candles}"
     )
+
     print(
-        f"ERRORS              : "
+        f"ERRORS                 : "
         f"{summary.errors}"
     )
 
     print()
     print("GRADE DISTRIBUTION")
-    print("-" * 120)
+    print("-" * 150)
 
     for grade in (
         "A+",
@@ -322,20 +500,31 @@ def print_results(
 
     print()
     print("MARKET RESULTS")
-    print("-" * 120)
+    print("-" * 150)
 
-    for symbol, result in results:
-        if result.confluence is not None:
-            print(
-                f"{symbol:<12} "
-                f"{result.status:<24} "
-                f"{result.setup.direction:<9} "
-                f"{result.confluence.grade:<9} "
-                f"{result.confluence.score:>6.1f} "
-                f"{result.reason}"
-            )
-        else:
-            setup_direction = (
+    print(
+        f"{'BASE':<12} "
+        f"{'ANALYSIS':<14} "
+        f"{'EXECUTION':<14} "
+        f"{'STATUS':<24} "
+        f"{'DIR':<9} "
+        f"{'GRADE':<10} "
+        f"{'SCORE':>6} "
+        f"REASON"
+    )
+
+    print("-" * 150)
+
+    for (
+        symbol,
+        descriptor,
+        result,
+    ) in results:
+        if (
+            result.confluence
+            is not None
+        ):
+            direction = (
                 result.setup.direction
                 if result.setup is not None
                 else "-"
@@ -343,15 +532,35 @@ def print_results(
 
             print(
                 f"{symbol:<12} "
+                f"{descriptor.analysis_market:<14} "
+                f"{descriptor.execution_market:<14} "
                 f"{result.status:<24} "
-                f"{setup_direction:<9} "
-                f"{'-':<9} "
+                f"{direction:<9} "
+                f"{result.confluence.grade:<10} "
+                f"{result.confluence.score:>6.1f} "
+                f"{result.reason}"
+            )
+
+        else:
+            direction = (
+                result.setup.direction
+                if result.setup is not None
+                else "-"
+            )
+
+            print(
+                f"{symbol:<12} "
+                f"{descriptor.analysis_market:<14} "
+                f"{descriptor.execution_market:<14} "
+                f"{result.status:<24} "
+                f"{direction:<9} "
+                f"{'-':<10} "
                 f"{'-':>6} "
                 f"{result.reason}"
             )
 
     print()
-    print("=" * 120)
+    print("=" * 150)
 
 
 def main() -> None:
@@ -360,7 +569,9 @@ def main() -> None:
         candle_limit=200,
     )
 
-    results, summary = scanner.scan()
+    results, summary = (
+        scanner.scan()
+    )
 
     print_results(
         results=results,
