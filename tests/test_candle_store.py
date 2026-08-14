@@ -291,3 +291,60 @@ def test_timeframe_is_part_of_unique_key(
         "BTC",
         timeframe="300",
     ) == 1
+
+def test_exchange_market_symbol_and_project_symbol_are_equivalent(
+    tmp_path,
+):
+    store = CandleStore(
+        tmp_path / "crypto.db"
+    )
+
+    candle = make_candle(
+        1000,
+        close=105.0,
+        volume=20.0,
+    )
+
+    store.save(
+        symbol="BTCIRT",
+        candle=candle,
+        timeframe="60",
+    )
+
+    assert store.count(
+        "BTC"
+    ) == 1
+
+    assert store.count(
+        "BTCIRT"
+    ) == 1
+
+    assert (
+        store.latest_timestamp(
+            "BTC"
+        )
+        == 1000
+    )
+
+    assert (
+        store.latest_timestamp(
+            "BTCIRT"
+        )
+        == 1000
+    )
+
+    assert (
+        store.get(
+            symbol="BTC",
+            timestamp=1000,
+        )
+        is not None
+    )
+
+    assert (
+        store.get(
+            symbol="BTCIRT",
+            timestamp=1000,
+        )
+        is not None
+    )
