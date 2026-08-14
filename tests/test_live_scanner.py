@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from core.market_registry import (
-    MarketRegistry,
-)
+from core.market_registry import MarketRegistry
 from models.candle import Candle
 from services.live_confluence_service import (
     LiveConfluenceResult,
 )
-from tools.live_scanner import (
-    LiveScanner,
-)
+from tools.live_scanner import LiveScanner
 
 
 class FakeMarketService:
@@ -19,6 +15,8 @@ class FakeMarketService:
     def markets(self):
         return {
             "stats": {
+                "BTC-usdt": {},
+                "ETH-usdt": {},
                 "BTC-rls": {},
                 "ETH-rls": {},
             }
@@ -46,7 +44,7 @@ class FakeMarketService:
                 low=95.0,
                 close=105.0,
                 volume=100.0,
-            ),
+            )
         ]
 
 
@@ -96,11 +94,13 @@ class FakeConfluenceService:
         )
 
 
-def test_extract_symbols():
+def test_extract_usdt_markets():
     symbols = (
-        LiveScanner._extract_symbols(
+        LiveScanner._extract_usdt_markets(
             {
                 "stats": {
+                    "BTC-usdt": {},
+                    "ETH-usdt": {},
                     "BTC-rls": {},
                     "ETH-rls": {},
                     "INVALID": {},
@@ -110,23 +110,18 @@ def test_extract_symbols():
     )
 
     assert symbols == [
-        "BTC",
-        "ETH",
+        "BTCUSDT",
+        "ETHUSDT",
     ]
 
 
-def test_btc_uses_btcusdt_for_analysis():
+def test_scan_uses_usdt_market_directly():
     market = FakeMarketService()
     confluence = (
         FakeConfluenceService()
     )
 
     registry = MarketRegistry()
-
-    registry.register_symbol(
-        "BTCIRT"
-    )
-
     registry.register_symbol(
         "BTCUSDT"
     )
@@ -139,8 +134,8 @@ def test_btc_uses_btcusdt_for_analysis():
         market_registry=registry,
     )
 
-    result = scanner.scan_symbol(
-        "BTC"
+    result = scanner.scan_market(
+        "BTCUSDT"
     )
 
     assert (
@@ -156,9 +151,13 @@ def test_btc_uses_btcusdt_for_analysis():
         )
     ]
 
+    assert len(
+        confluence.calls
+    ) == 1
+
     assert (
-        len(confluence.calls)
-        == 1
+        confluence.calls[0]["symbol"]
+        == "BTC"
     )
 
     assert (
@@ -169,67 +168,18 @@ def test_btc_uses_btcusdt_for_analysis():
     )
 
 
-def test_btcirt_falls_back_to_usdt_reference():
+def test_scan_discovers_only_usdt_markets():
     market = FakeMarketService()
     confluence = (
         FakeConfluenceService()
     )
 
     registry = MarketRegistry()
-
     registry.register_symbol(
-        "BTCIRT"
+        "BTCUSDT"
     )
-
-    scanner = LiveScanner(
-        market_service=market,
-        candle_store=FakeCandleStore(),
-        trade_store=FakeTradeStore(),
-        confluence_service=confluence,
-        market_registry=registry,
-    )
-
-    descriptor = (
-        scanner._resolve_market(
-            "BTC"
-        )
-    )
-
-    assert (
-        descriptor.base_asset
-        == "BTC"
-    )
-
-    assert (
-        descriptor.quote_asset
-        == "IRT"
-    )
-
-    assert (
-        descriptor.analysis_market
-        == "BTCUSDT"
-    )
-
-    assert (
-        descriptor.execution_market
-        == "BTCIRT"
-    )
-
-
-def test_scan_all_symbols():
-    market = FakeMarketService()
-    confluence = (
-        FakeConfluenceService()
-    )
-
-    registry = MarketRegistry()
-
     registry.register_symbol(
-        "BTCIRT"
-    )
-
-    registry.register_symbol(
-        "ETHIRT"
+        "ETHUSDT"
     )
 
     scanner = LiveScanner(
@@ -257,29 +207,164 @@ def test_scan_all_symbols():
     )
 
     assert (
-        summary.evaluated
-        == 0
-    )
-
-    assert (
         summary.errors
         == 0
     )
 
-    btc = next(
-        item
-        for item in results
-        if item[0] == "BTC"
+    for (
+        base,
+        descriptor,
+        result,
+    ) in results:
+        assert (
+            descriptor.analysis_market
+            == f"{base}USDT"
+        )
+
+        assert (
+            descriptor.execution_market
+            == f"{base}USDT"
+        )
+
+        assert (
+            result.status
+            == "NO_STRUCTURE_SETUP"
+        )
+
+
+def test_irt_market_can_be_execution_fallback():
+    registry = MarketRegistry()
+
+    registry.register_symbol(
+        "BTCIRT"
+    )
+
+    descriptor = (
+        registry.build_descriptor(
+            "BTCIRT"
+        )
     )
 
     assert (
-        btc[1].analysis_market
+        descriptor.base_asset
+        == "BTC"
+    )
+
+    assert (
+        descriptor.quote_asset
+        == "IRT"
+    )
+
+    assert (
+        descriptor.analysis_market
         == "BTCUSDT"
     )
 
     assert (
-        btc[1].execution_market
+        descriptor.execution_market
         == "BTCIRT"
+    )
+
+
+def test_btc_uses_btcusdt_for_analysis():
+    market = FakeMarketService()
+    confluence = (
+        FakeConfluenceService()
+    )
+
+    registry = MarketRegistry()
+
+    registry.register_symbol(
+        "BTCIRT"
+    )
+
+    registry.register_symbol(
+        "BTCUSDT"
+    )
+
+    scanner = LiveScanner(
+        market_service=market,
+        candle_store=FakeCandleStore(),
+        trade_store=FakeTradeStore(),
+        confluence_service=confluence,
+        market_registry=registry,
+    )
+
+    result = scanner.scan_market(
+        "BTCUSDT"
+    )
+
+    assert (
+        result.status
+        == "NO_STRUCTURE_SETUP"
+    )
+
+    assert market.history_calls == [
+        (
+            "BTCUSDT",
+            "60",
+            200,
+        )
+    ]
+
+    assert len(
+        confluence.calls
+    ) == 1
+
+    assert (
+        confluence.calls[0]["symbol"]
+        == "BTC"
+    )
+
+
+def test_eth_uses_ethusdt_for_analysis():
+    market = FakeMarketService()
+    confluence = (
+        FakeConfluenceService()
+    )
+
+    registry = MarketRegistry()
+
+    registry.register_symbol(
+        "ETHIRT"
+    )
+
+    registry.register_symbol(
+        "ETHUSDT"
+    )
+
+    scanner = LiveScanner(
+        market_service=market,
+        candle_store=FakeCandleStore(),
+        trade_store=FakeTradeStore(),
+        confluence_service=confluence,
+        market_registry=registry,
+    )
+
+    result = scanner.scan_market(
+        "ETHUSDT"
+    )
+
+    assert (
+        result.status
+        == "NO_STRUCTURE_SETUP"
+    )
+
+    assert market.history_calls == [
+        (
+            "ETHUSDT",
+            "60",
+            200,
+        )
+    ]
+
+    assert len(
+        confluence.calls
+    ) == 1
+
+    assert (
+        confluence.calls[0]["symbol"]
+        == "ETH"
     )
 
 
@@ -300,4 +385,116 @@ def test_usdt_bridge_is_not_converted_to_usdtusdt():
     assert (
         descriptor.execution_market
         == "USDTIRT"
+    )
+
+
+def test_scan_returns_market_descriptor():
+    market = FakeMarketService()
+    confluence = (
+        FakeConfluenceService()
+    )
+
+    registry = MarketRegistry()
+
+    registry.register_symbol(
+        "BTCUSDT"
+    )
+
+    scanner = LiveScanner(
+        market_service=market,
+        candle_store=FakeCandleStore(),
+        trade_store=FakeTradeStore(),
+        confluence_service=confluence,
+        market_registry=registry,
+    )
+
+    results, _ = scanner.scan(
+        symbols=["BTCUSDT"]
+    )
+
+    assert len(results) == 1
+
+    base, descriptor, result = (
+        results[0]
+    )
+
+    assert base == "BTC"
+
+    assert (
+        descriptor.market_symbol
+        == "BTCUSDT"
+    )
+
+    assert (
+        descriptor.base_asset
+        == "BTC"
+    )
+
+    assert (
+        descriptor.quote_asset
+        == "USDT"
+    )
+
+    assert (
+        descriptor.analysis_market
+        == "BTCUSDT"
+    )
+
+    assert (
+        descriptor.execution_market
+        == "BTCUSDT"
+    )
+
+    assert (
+        result.status
+        == "NO_STRUCTURE_SETUP"
+    )
+
+
+def test_scan_custom_usdt_symbols():
+    market = FakeMarketService()
+    confluence = (
+        FakeConfluenceService()
+    )
+
+    registry = MarketRegistry()
+
+    registry.register_symbol(
+        "BTCUSDT"
+    )
+
+    registry.register_symbol(
+        "ETHUSDT"
+    )
+
+    scanner = LiveScanner(
+        market_service=market,
+        candle_store=FakeCandleStore(),
+        trade_store=FakeTradeStore(),
+        confluence_service=confluence,
+        market_registry=registry,
+    )
+
+    results, summary = scanner.scan(
+        symbols=[
+            "BTCUSDT",
+            "ETHUSDT",
+        ]
+    )
+
+    assert len(results) == 2
+
+    assert (
+        summary.total_symbols
+        == 2
+    )
+
+    assert (
+        summary.errors
+        == 0
+    )
+
+    assert (
+        summary.no_structure_setup
+        == 2
     )
