@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.candle_store import CandleStore
 from microstructure.confluence_engine import (
     ConfluenceEngine,
 )
@@ -26,6 +27,7 @@ from microstructure.structure_setup import (
 from models.confluence_result import (
     ConfluenceResult,
 )
+from models.candle import Candle
 from models.structure_setup import (
     StructureSetup,
 )
@@ -49,7 +51,17 @@ class LiveConfluenceResult:
 
 class LiveConfluenceService:
     """
-    Orchestrate the live structure/confluence pipeline.
+    Live structure/confluence pipeline.
+
+    Candle source priority:
+
+        1. Live CandleStore
+        2. Explicit candles argument
+
+    Live CandleStore is the preferred source because it is fed
+    by the Nobitex WebSocket candle stream.
+
+    Historical REST candles remain useful as bootstrap data.
     """
 
     def __init__(
@@ -63,7 +75,14 @@ class LiveConfluenceService:
             HistoricalConfluenceEngine | None
         ) = None,
         freshness_checker: LiveDataFreshness | None = None,
+        candle_store: CandleStore | None = None,
+        min_candles_for_structure: int = 20,
     ) -> None:
+        if min_candles_for_structure <= 0:
+            raise ValueError(
+                "min_candles_for_structure must be greater than zero."
+            )
+
         self.market_structure = (
             market_structure_engine
             if market_structure_engine is not None
@@ -110,57 +129,165 @@ class LiveConfluenceService:
             )
         )
 
-    def evaluate(
+        self.candle_store = (
+            candle_store
+            if candle_store is not None
+            else CandleStore()
+        )
+
+        self.min_candles_for_structure = (
+            int(min_candles_for_structure)
+        )
+
+    def get_live_candles(
         self,
         symbol: str,
-        candles,
-        latest_trade_timestamp: int | None = None,
-        swing_window: int = 2,
-        displacement_pct: float = 0.15,
-        max_bars_after_sweep: int = 10,
-        lookback_seconds: int = 3600,
-    ) -> LiveConfluenceResult:
+        fallback_candles=None,
+        timeframe: str = "60",
+        limit: int = 200,
+    ) -> list[Candle]:
         """
-        Run complete live analysis for one symbol.
+        Return the best available candle set.
 
-        `latest_trade_timestamp` is optional. When provided,
-        it is used directly by the freshness gate.
+        The WebSocket CandleStore is preferred when it has enough
+        candles. Otherwise the explicitly supplied bootstrap/history
+        candles are used.
 
-        This keeps the freshness layer independent from the
-        HistoricalContextEngine storage implementation.
+        When a live candle exists, it replaces the same timestamp
+        in the bootstrap series or is appended when newer.
         """
 
         normalized_symbol = (
             symbol.strip().upper()
         )
 
-        if not candles:
+        stored = self.candle_store.get_recent(
+            symbol=normalized_symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+
+        bootstrap = list(
+            fallback_candles or []
+        )
+
+        if not stored:
+            return bootstrap
+
+        if not bootstrap:
+            return stored
+
+        merged: dict[int, Candle] = {
+            int(candle.timestamp): candle
+            for candle in bootstrap
+        }
+
+        for candle in stored:
+            merged[int(candle.timestamp)] = candle
+
+        ordered = sorted(
+            merged.values(),
+            key=lambda candle: int(
+                candle.timestamp
+            ),
+        )
+
+        return ordered[-limit:]
+
+    def latest_live_candle(
+        self,
+        symbol: str,
+        timeframe: str = "60",
+    ) -> Candle | None:
+        """
+        Return the latest WebSocket candle from CandleStore.
+        """
+
+        return self.candle_store.latest(
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+
+    def evaluate(
+        self,
+        symbol: str,
+        candles=None,
+        latest_trade_timestamp: int | None = None,
+        timeframe: str = "60",
+        candle_limit: int = 200,
+        swing_window: int = 2,
+        displacement_pct: float = 0.15,
+        max_bars_after_sweep: int = 10,
+        lookback_seconds: int = 3600,
+    ) -> LiveConfluenceResult:
+        """
+        Run the complete live analysis pipeline.
+
+        Live WebSocket candles are preferred.
+
+        Bootstrap candles may be supplied through `candles`.
+        """
+
+        normalized_symbol = (
+            symbol.strip().upper()
+        )
+
+        live_candle = (
+            self.latest_live_candle(
+                symbol=normalized_symbol,
+                timeframe=timeframe,
+            )
+        )
+
+        analysis_candles = (
+            self.get_live_candles(
+                symbol=normalized_symbol,
+                fallback_candles=candles,
+                timeframe=timeframe,
+                limit=candle_limit,
+            )
+        )
+
+        if not analysis_candles:
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
                 confluence=None,
                 status="NO_CANDLES",
-                reason="No candles were supplied.",
+                reason="No candles were available.",
             )
 
         # --------------------------------------------------
-        # 0. DATA FRESHNESS
+        # Freshness reference
         # --------------------------------------------------
+
+        latest_candle = (
+            live_candle
+            if live_candle is not None
+            else analysis_candles[-1]
+        )
+
+        if latest_trade_timestamp is None:
+            try:
+                latest_trade_timestamp = (
+                    self.historical_context
+                    .trade_store
+                    .latest_timestamp(
+                        normalized_symbol
+                    )
+                )
+            except Exception:
+                latest_trade_timestamp = None
 
         try:
-            latest_candle_timestamp = int(
-                candles[-1].timestamp
-            )
-
             freshness = self.freshness.check(
-                latest_candle_timestamp=(
-                    latest_candle_timestamp
+                latest_candle_timestamp=int(
+                    latest_candle.timestamp
                 ),
                 latest_trade_timestamp=(
                     latest_trade_timestamp
                 ),
             )
-
         except Exception as exc:
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
@@ -185,11 +312,32 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 1. MARKET STRUCTURE
+        # Structure needs enough candles
+        # --------------------------------------------------
+
+        if (
+            len(analysis_candles)
+            < self.min_candles_for_structure
+        ):
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=None,
+                confluence=None,
+                status="INSUFFICIENT_CANDLES",
+                reason=(
+                    f"Only {len(analysis_candles)} candles "
+                    f"available; "
+                    f"{self.min_candles_for_structure} "
+                    f"required."
+                ),
+            )
+
+        # --------------------------------------------------
+        # Market Structure
         # --------------------------------------------------
 
         structure = self.market_structure.calculate(
-            candles=candles,
+            candles=analysis_candles,
             swing_window=swing_window,
         )
 
@@ -205,12 +353,12 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 2. STRUCTURE BREAK
+        # Structure Break
         # --------------------------------------------------
 
         structure_breaks = (
             self.structure_break.calculate(
-                candles=candles,
+                candles=analysis_candles,
                 structure=structure,
                 displacement_pct=displacement_pct,
             )
@@ -228,11 +376,11 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 3. LIQUIDITY SWEEP
+        # Liquidity Sweep
         # --------------------------------------------------
 
         sweeps = self.liquidity_sweep.calculate(
-            candles=candles,
+            candles=analysis_candles,
             structure=structure,
         )
 
@@ -248,7 +396,7 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 4. STRUCTURE SETUP
+        # Structure Setup
         # --------------------------------------------------
 
         setups = self.structure_setup.calculate(
@@ -282,7 +430,7 @@ class LiveConfluenceService:
         )
 
         # --------------------------------------------------
-        # 5. HISTORICAL CONTEXT
+        # Historical Context
         # --------------------------------------------------
 
         try:
@@ -317,7 +465,7 @@ class LiveConfluenceService:
             )
 
         # --------------------------------------------------
-        # 6. HISTORICAL CONFLUENCE
+        # Historical Confluence
         # --------------------------------------------------
 
         try:
