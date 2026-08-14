@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from core.trade_store import TradeStore
+from microstructure.bucketed_cvd_divergence import (
+    BucketedCVDAnalyzer,
+)
 from microstructure.cvd_engine import CVDEngine
 from microstructure.cvd_strength import (
     CVDStrengthAnalyzer,
 )
 from microstructure.time_bucketed_cvd import (
     TimeBucketedCVDEngine,
-)
-from microstructure.bucketed_cvd_divergence import (
-    BucketedCVDAnalyzer,
 )
 from microstructure.volume_profile import (
     VolumeProfileEngine,
@@ -28,17 +28,16 @@ class HistoricalContextEngine:
         only trades with timestamp <= target_timestamp
         are allowed into every calculation.
 
-    No current/future market information is used.
+    The public candle/structure timestamps in this project
+    are seconds, while live captured trades are stored in
+    milliseconds.
 
-    Current implementation reconstructs:
-
-        - CVD
-        - CVD strength
-        - CVD divergence
-        - trade-derived VWAP
-        - Volume Profile
-        - POC / VAH / VAL
+    This engine automatically normalizes the query timestamp
+    to the timestamp unit used by TradeStore while preserving
+    the original historical timestamp in the result.
     """
+
+    MILLISECOND_THRESHOLD = 100_000_000_000
 
     def __init__(
         self,
@@ -97,6 +96,12 @@ class HistoricalContextEngine:
         """
         Reconstruct context at `timestamp`.
 
+        `timestamp` is expected to be in the same unit as
+        candle/structure timestamps.
+
+        The engine detects the unit used by TradeStore and
+        converts the query timestamp when required.
+
         Only trades inside:
 
             [timestamp - lookback_seconds, timestamp]
@@ -118,11 +123,32 @@ class HistoricalContextEngine:
             symbol.strip().upper()
         )
 
-        trades = (
-            self.trade_store.get_trades_as_of(
+        timestamp_scale = (
+            self._detect_timestamp_scale(
                 symbol=normalized_symbol,
-                end_timestamp=timestamp,
-                lookback_seconds=lookback_seconds,
+            )
+        )
+
+        query_timestamp = (
+            int(timestamp)
+            * timestamp_scale
+        )
+
+        lookback_units = (
+            int(lookback_seconds)
+            * timestamp_scale
+        )
+
+        start_timestamp = (
+            query_timestamp
+            - lookback_units
+        )
+
+        trades = (
+            self.trade_store.get_trades(
+                symbol=normalized_symbol,
+                start_timestamp=start_timestamp,
+                end_timestamp=query_timestamp,
             )
         )
 
@@ -140,7 +166,8 @@ class HistoricalContextEngine:
         future_trades = [
             trade
             for trade in trades
-            if int(trade.timestamp) > timestamp
+            if int(trade.timestamp)
+            > query_timestamp
         ]
 
         if future_trades:
@@ -188,21 +215,21 @@ class HistoricalContextEngine:
 
         # --------------------------------------------------
         # Historical VWAP
-        #
-        # This is trade-derived VWAP and intentionally
-        # does not depend on current VWAP.
         # --------------------------------------------------
 
         vwap = self._calculate_vwap(
             trades=trades
         )
 
-        previous_vwap = self._calculate_previous_vwap(
-            trades=trades,
-            lookback_seconds=min(
-                lookback_seconds,
-                900,
-            ),
+        previous_vwap = (
+            self._calculate_previous_vwap(
+                trades=trades,
+                lookback_seconds=min(
+                    lookback_seconds,
+                    900,
+                ),
+                timestamp_scale=timestamp_scale,
+            )
         )
 
         last_price = float(
@@ -248,8 +275,11 @@ class HistoricalContextEngine:
         )
 
         return HistoricalContext(
+            # IMPORTANT:
+            # Keep original Setup/Candle timestamp.
             symbol=normalized_symbol,
             timestamp=int(timestamp),
+
             trade_count=len(trades),
             lookback_seconds=int(
                 lookback_seconds
@@ -289,6 +319,38 @@ class HistoricalContextEngine:
             historical=True,
         )
 
+    def _detect_timestamp_scale(
+        self,
+        symbol: str,
+    ) -> int:
+        """
+        Detect the timestamp unit stored in TradeStore.
+
+        Returns:
+
+            1     -> seconds
+            1000  -> milliseconds
+
+        The threshold is intentionally simple and deterministic.
+        """
+
+        latest_timestamp = (
+            self.trade_store.latest_timestamp(
+                symbol
+            )
+        )
+
+        if latest_timestamp is None:
+            return 1
+
+        if (
+            latest_timestamp
+            >= self.MILLISECOND_THRESHOLD
+        ):
+            return 1000
+
+        return 1
+
     @staticmethod
     def _calculate_vwap(
         trades,
@@ -312,18 +374,22 @@ class HistoricalContextEngine:
             for trade in trades
         )
 
-        return weighted_value / total_volume
+        return (
+            weighted_value
+            / total_volume
+        )
 
     @staticmethod
     def _calculate_previous_vwap(
         trades,
         lookback_seconds: int,
+        timestamp_scale: int,
     ) -> float | None:
         """
         Calculate VWAP for the previous time slice.
 
-        The latest slice is excluded so the slope does not
-        compare a value with itself.
+        The previous slice is expressed in the same timestamp
+        unit as the trades.
         """
 
         if len(trades) < 2:
@@ -333,9 +399,14 @@ class HistoricalContextEngine:
             trades[-1].timestamp
         )
 
+        lookback_units = (
+            int(lookback_seconds)
+            * int(timestamp_scale)
+        )
+
         cutoff = (
             latest_timestamp
-            - lookback_seconds
+            - lookback_units
         )
 
         previous = [
@@ -380,7 +451,9 @@ class HistoricalContextEngine:
             return 0.0
 
         return (
-            (price - vwap)
+            (
+                price - vwap
+            )
             / abs(vwap)
             * 100.0
         )

@@ -272,3 +272,46 @@ def test_invalid_lookback_fails(
         raise AssertionError(
             "Expected ValueError."
         )
+def test_seconds_setup_timestamp_matches_millisecond_trades(
+    tmp_path,
+):
+    store = TradeStore(
+        tmp_path / "crypto.db"
+    )
+
+    store.save_trades(
+        [
+            make_trade(
+                1786681800000,
+                100.0,
+                2.0,
+                "buy",
+            ),
+            make_trade(
+                1786681801000,
+                101.0,
+                1.0,
+                "buy",
+            ),
+            make_trade(
+                1786681802000,
+                100.0,
+                2.0,
+                "sell",
+            ),
+        ]
+    )
+
+    engine = HistoricalContextEngine(
+        trade_store=store
+    )
+
+    result = engine.calculate(
+        symbol="BTC",
+        timestamp=1786681802,
+        lookback_seconds=3600,
+    )
+
+    assert result.timestamp == 1786681802
+    assert result.trade_count == 3
+    assert result.historical is True
