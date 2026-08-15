@@ -8,25 +8,11 @@ class MarketDescriptor:
     """
     Canonical description of one market.
 
-    Examples:
+    Current production analysis:
+        BASEUSDT
 
-        BTCIRT
-            base_asset       = BTC
-            quote_asset      = IRT
-            analysis_market  = BTCUSDT
-            execution_market = BTCIRT
-
-        BTCUSDT
-            base_asset       = BTC
-            quote_asset      = USDT
-            analysis_market  = BTCUSDT
-            execution_market = BTCUSDT
-
-        USDTIRT
-            base_asset       = USDT
-            quote_asset      = IRT
-            analysis_market  = USDTIRT
-            execution_market = USDTIRT
+    Legacy IRT/bridge fields remain supported for backward
+    compatibility with older components and tests.
     """
 
     market_symbol: str
@@ -40,15 +26,12 @@ class MarketRegistry:
     """
     Central market identity registry.
 
-    Project rule:
+    Production analysis:
+        USDT
 
-        USDT is the primary analysis quote.
-
-    IRT is allowed as:
-        - local execution quote
-        - local price quote
-
-    USDTIRT is the quote bridge.
+    Legacy compatibility:
+        IRT
+        USDTIRT bridge
     """
 
     ANALYSIS_QUOTE = "USDT"
@@ -76,24 +59,14 @@ class MarketRegistry:
 
         return value
 
-    @staticmethod
+    @classmethod
     def _parse_market_symbol(
+        cls,
         market_symbol: str,
     ) -> tuple[str, str]:
-        """
-        Parse supported market quote suffixes.
-
-        Longest suffixes are checked first.
-        """
-
-        symbol = (
-            market_symbol.strip().upper()
+        symbol = cls.normalize_market_symbol(
+            market_symbol
         )
-
-        if not symbol:
-            raise ValueError(
-                "Market symbol cannot be empty."
-            )
 
         known_quotes = (
             "USDT",
@@ -105,7 +78,7 @@ class MarketRegistry:
 
         for quote in known_quotes:
             if symbol.endswith(quote):
-                base = symbol[: -len(quote)]
+                base = symbol[:-len(quote)]
 
                 if base:
                     return base, quote
@@ -120,39 +93,32 @@ class MarketRegistry:
         cls,
         market_symbol: str,
     ) -> MarketDescriptor:
-        normalized = (
-            cls.normalize_market_symbol(
-                market_symbol
-            )
+        normalized = cls.normalize_market_symbol(
+            market_symbol
         )
 
-        base, quote = (
-            cls._parse_market_symbol(
-                normalized
-            )
+        base, quote = cls._parse_market_symbol(
+            normalized
         )
 
-        # USDT/IRT is the bridge market itself.
+        # Legacy bridge market.
+        #
+        # USDTIRT must remain USDTIRT and must NOT
+        # become USDTUSDT.
         if (
             base == cls.ANALYSIS_QUOTE
             and quote == cls.LOCAL_QUOTE
         ):
             analysis_market = normalized
 
-        # BASE/USDT is already the canonical
-        # analysis market.
         elif quote == cls.ANALYSIS_QUOTE:
             analysis_market = normalized
 
-        # BASE/IRT should be analyzed against
-        # BASE/USDT.
         elif quote == cls.LOCAL_QUOTE:
             analysis_market = (
                 f"{base}{cls.ANALYSIS_QUOTE}"
             )
 
-        # Other quote assets currently map to
-        # BASE/USDT as the analysis reference.
         else:
             analysis_market = (
                 f"{base}{cls.ANALYSIS_QUOTE}"
@@ -170,10 +136,8 @@ class MarketRegistry:
         self,
         descriptor: MarketDescriptor,
     ) -> None:
-        normalized = (
-            self.normalize_market_symbol(
-                descriptor.market_symbol
-            )
+        normalized = self.normalize_market_symbol(
+            descriptor.market_symbol
         )
 
         if normalized != descriptor.market_symbol:
@@ -182,19 +146,21 @@ class MarketRegistry:
                 "normalized market_symbol."
             )
 
-        self._markets[normalized] = descriptor
+        self._markets[
+            normalized
+        ] = descriptor
 
     def register_symbol(
         self,
         market_symbol: str,
     ) -> MarketDescriptor:
-        descriptor = (
-            self.build_descriptor(
-                market_symbol
-            )
+        descriptor = self.build_descriptor(
+            market_symbol
         )
 
-        self.register(descriptor)
+        self.register(
+            descriptor
+        )
 
         return descriptor
 
@@ -202,13 +168,13 @@ class MarketRegistry:
         self,
         market_symbol: str,
     ) -> MarketDescriptor | None:
-        normalized = (
-            self.normalize_market_symbol(
-                market_symbol
-            )
+        normalized = self.normalize_market_symbol(
+            market_symbol
         )
 
-        return self._markets.get(normalized)
+        return self._markets.get(
+            normalized
+        )
 
     def require(
         self,
@@ -297,6 +263,11 @@ class MarketRegistry:
         self,
         base_asset: str,
     ) -> str:
+        """
+        Legacy compatibility helper.
+        Not used by the Gate.io analytical path.
+        """
+
         base = base_asset.strip().upper()
 
         if not base:
@@ -315,7 +286,7 @@ class MarketRegistry:
         usdt_irt_price: float,
     ) -> float:
         """
-        Convert BASE/IRT to implicit BASE/USDT.
+        Legacy compatibility helper.
 
         BASE/USDT =
             BASE/IRT / USDT/IRT

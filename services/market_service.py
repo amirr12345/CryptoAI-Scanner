@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from api.base import MarketDataProvider
-from api.nobitex import NobitexExchange
+from api.gateio import GateIOExchange
 from models.candle import Candle
 from models.order_book import OrderBook
+from models.ticker import Ticker
 from models.trade import Trade
 
 
 class MarketService:
     """
-    Provider-agnostic service layer for market data access.
+    Provider-agnostic market-data service.
 
-    The service depends on the generic MarketDataProvider interface,
-    not on a specific exchange implementation.
+    Primary provider:
+        Gate.io
 
-    Nobitex remains the default provider for backward compatibility.
+    Primary analysis universe:
+        BASEUSDT
+
+    Backward-compatible provider injection remains supported.
     """
 
     def __init__(
@@ -22,23 +26,6 @@ class MarketService:
         provider: MarketDataProvider | None = None,
         exchange: MarketDataProvider | None = None,
     ):
-        """
-        Initialize MarketService.
-
-        Parameters
-        ----------
-        provider:
-            Generic market data provider.
-
-        exchange:
-            Backward-compatible alias for older code/tests.
-
-        Notes
-        -----
-        If both provider and exchange are supplied, provider takes
-        precedence.
-        """
-
         if provider is not None:
             self.provider = provider
 
@@ -46,27 +33,38 @@ class MarketService:
             self.provider = exchange
 
         else:
-            self.provider = NobitexExchange()
+            self.provider = GateIOExchange()
 
     @property
-    def exchange(self) -> MarketDataProvider:
-        """
-        Backward-compatible alias for the configured provider.
-
-        New code should use `provider`.
-        """
+    def exchange(
+        self,
+    ) -> MarketDataProvider:
         return self.provider
 
-    def btc(self):
+    def btc(self) -> Ticker:
         """
         Backward-compatible BTC ticker helper.
+
+        Gate.io uses BTCUSDT internally, but the legacy helper
+        continues exposing BTC as the returned model symbol.
         """
-        return self.provider.get_ticker("btc")
+
+        ticker = self.provider.get_ticker(
+            "BTCUSDT"
+        )
+
+        if ticker.symbol == "BTC":
+            return ticker
+
+        return Ticker(
+            symbol="BTC",
+            last_price=ticker.last_price,
+            high=ticker.high,
+            low=ticker.low,
+            volume=ticker.volume,
+        )
 
     def markets(self) -> dict:
-        """
-        Return available market statistics.
-        """
         return self.provider.get_markets()
 
     def history(
@@ -75,9 +73,6 @@ class MarketService:
         resolution: str = "60",
         countback: int = 200,
     ) -> list[Candle]:
-        """
-        Return OHLCV candles for a market.
-        """
         return self.provider.get_history(
             symbol=symbol,
             resolution=resolution,
@@ -89,12 +84,41 @@ class MarketService:
         symbol: str,
         limit: int = 100,
     ) -> list[Trade]:
-        """
-        Return recent executed trades for a market.
-        """
         return self.provider.get_trades(
             symbol=symbol,
             limit=limit,
+        )
+
+    def historical_trades(
+        self,
+        symbol: str,
+        end_timestamp_ms: int | None = None,
+        lookback_seconds: int = 3600,
+        max_pages: int = 20,
+    ) -> list[Trade]:
+        """
+        Provider-specific historical trade support.
+
+        Gate.io implements this method.
+        """
+
+        method = getattr(
+            self.provider,
+            "get_historical_trades",
+            None,
+        )
+
+        if method is None:
+            raise NotImplementedError(
+                "Configured provider does not implement "
+                "get_historical_trades()."
+            )
+
+        return method(
+            symbol=symbol,
+            end_timestamp_ms=end_timestamp_ms,
+            lookback_seconds=lookback_seconds,
+            max_pages=max_pages,
         )
 
     def orderbook(
@@ -102,9 +126,6 @@ class MarketService:
         symbol: str,
         depth: int = 20,
     ) -> OrderBook:
-        """
-        Return a Level 2 order book snapshot.
-        """
         return self.provider.get_orderbook(
             symbol=symbol,
             depth=depth,
