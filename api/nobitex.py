@@ -15,24 +15,158 @@ from models.trade import Trade
 class NobitexExchange(MarketDataProvider):
     """
     Nobitex market data provider.
+
+    Market symbol rules:
+
+        BTC
+            -> legacy/default market -> BTCIRT
+
+        BTCIRT
+            -> exact IRT market
+
+        BTCUSDT
+            -> exact USDT market
+
+    Important distinction:
+
+        API market symbol:
+            BTCUSDT / BTCIRT
+
+        Domain model base symbol:
+            BTC
+
+    This keeps backward compatibility while allowing
+    USDT-qualified markets to be used directly.
     """
 
     BASE_URL = "https://apiv2.nobitex.ir"
 
-    def get_ticker(self, symbol: str) -> Ticker:
+    @staticmethod
+    def _normalize_market_symbol(
+        symbol: str,
+        default_quote: str = "IRT",
+    ) -> str:
         """
-        Get current market ticker.
+        Normalize a market symbol while preserving an
+        explicitly supplied quote asset.
+
+        Examples:
+
+            BTC
+                -> BTCIRT
+
+            BTCIRT
+                -> BTCIRT
+
+            BTCUSDT
+                -> BTCUSDT
+
+            ETHUSDC
+                -> ETHUSDC
         """
 
         if not symbol:
-            raise ValueError("Symbol cannot be empty.")
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
 
-        symbol = symbol.strip().lower()
+        value = (
+            symbol.strip()
+            .upper()
+        )
+
+        if not value:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
+
+        if value.endswith("USDT"):
+            return value
+
+        if value.endswith("USDC"):
+            return value
+
+        if value.endswith("IRT"):
+            return value
+
+        return (
+            f"{value}"
+            f"{default_quote}"
+        )
+
+    @staticmethod
+    def _extract_base_symbol(
+        market_symbol: str,
+    ) -> str:
+        """
+        Extract the BASE asset from a qualified market.
+
+        Examples:
+
+            BTCUSDT
+                -> BTC
+
+            BTCIRT
+                -> BTC
+
+            ETHUSDC
+                -> ETH
+
+            USDTIRT
+                -> USDT
+        """
+
+        value = (
+            market_symbol
+            .strip()
+            .upper()
+        )
+
+        for quote in (
+            "USDT",
+            "USDC",
+            "IRT",
+        ):
+            if value.endswith(quote):
+                base = value[
+                    : -len(quote)
+                ]
+
+                if base:
+                    return base
+
+        return value
+
+    def get_ticker(
+        self,
+        symbol: str,
+    ) -> Ticker:
+        """
+        Get current Nobitex IRT ticker.
+
+        This remains backward-compatible with the
+        historical ticker implementation.
+
+        Example:
+
+            BTC
+                -> BTC-rls
+        """
+
+        if not symbol:
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
+
+        source_symbol = (
+            symbol.strip().lower()
+        )
 
         response = requests.get(
-            self.BASE_URL + "/market/stats",
+            self.BASE_URL
+            + "/market/stats",
             params={
-                "srcCurrency": symbol,
+                "srcCurrency": source_symbol,
                 "dstCurrency": "rls",
             },
             timeout=10,
@@ -44,34 +178,52 @@ class NobitexExchange(MarketDataProvider):
 
         if data.get("status") != "ok":
             raise ValueError(
-                f"Nobitex market stats failed: {data}"
+                "Nobitex market stats failed: "
+                f"{data}"
             )
 
-        market_key = f"{symbol}-rls"
+        market_key = (
+            f"{source_symbol}-rls"
+        )
 
         try:
-            market = data["stats"][market_key]
+            market = (
+                data["stats"]
+                [market_key]
+            )
+
         except KeyError as exc:
             raise ValueError(
-                f"Market not found in Nobitex response: "
+                "Market not found in Nobitex response: "
                 f"{market_key}"
             ) from exc
 
         return Ticker(
-            symbol=symbol.upper(),
-            last_price=float(market["latest"]),
-            high=float(market["dayHigh"]),
-            low=float(market["dayLow"]),
-            volume=float(market["volumeSrc"]),
+            symbol=source_symbol.upper(),
+            last_price=float(
+                market["latest"]
+            ),
+            high=float(
+                market["dayHigh"]
+            ),
+            low=float(
+                market["dayLow"]
+            ),
+            volume=float(
+                market["volumeSrc"]
+            ),
         )
 
-    def get_markets(self) -> dict:
+    def get_markets(
+        self,
+    ) -> dict:
         """
         Get all Nobitex market statistics.
         """
 
         response = requests.get(
-            self.BASE_URL + "/market/stats",
+            self.BASE_URL
+            + "/market/stats",
             timeout=10,
         )
 
@@ -81,7 +233,8 @@ class NobitexExchange(MarketDataProvider):
 
         if data.get("status") != "ok":
             raise ValueError(
-                f"Nobitex market stats failed: {data}"
+                "Nobitex market stats failed: "
+                f"{data}"
             )
 
         return data
@@ -94,10 +247,25 @@ class NobitexExchange(MarketDataProvider):
     ) -> list[Candle]:
         """
         Get OHLCV historical candles from Nobitex UDF.
+
+        Explicit market symbols are preserved.
+
+        Examples:
+
+            BTC
+                -> request BTCIRT
+
+            BTCIRT
+                -> request BTCIRT
+
+            BTCUSDT
+                -> request BTCUSDT
         """
 
         if not symbol:
-            raise ValueError("Symbol cannot be empty.")
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
 
         if not resolution:
             raise ValueError(
@@ -115,24 +283,30 @@ class NobitexExchange(MarketDataProvider):
                 "per request."
             )
 
-        normalized_symbol = symbol.strip().upper()
+        normalized_symbol = (
+            self._normalize_market_symbol(
+                symbol
+            )
+        )
 
-        if normalized_symbol.endswith("IRT"):
-            udf_symbol = normalized_symbol
-        else:
-            udf_symbol = f"{normalized_symbol}IRT"
-
-        to_timestamp = int(time.time())
+        to_timestamp = int(
+            time.time()
+        )
 
         params = {
-            "symbol": udf_symbol,
-            "resolution": resolution,
+            "symbol": normalized_symbol,
+            "resolution": str(
+                resolution
+            ),
             "to": to_timestamp,
-            "countback": countback,
+            "countback": int(
+                countback
+            ),
         }
 
         response = requests.get(
-            self.BASE_URL + "/market/udf/history",
+            self.BASE_URL
+            + "/market/udf/history",
             params=params,
             timeout=10,
         )
@@ -143,15 +317,39 @@ class NobitexExchange(MarketDataProvider):
 
         if data.get("s") != "ok":
             raise ValueError(
-                f"Nobitex history request failed: {data}"
+                "Nobitex history request failed: "
+                f"{data}"
             )
 
-        timestamps = data.get("t", [])
-        opens = data.get("o", [])
-        highs = data.get("h", [])
-        lows = data.get("l", [])
-        closes = data.get("c", [])
-        volumes = data.get("v", [])
+        timestamps = data.get(
+            "t",
+            [],
+        )
+
+        opens = data.get(
+            "o",
+            [],
+        )
+
+        highs = data.get(
+            "h",
+            [],
+        )
+
+        lows = data.get(
+            "l",
+            [],
+        )
+
+        closes = data.get(
+            "c",
+            [],
+        )
+
+        volumes = data.get(
+            "v",
+            [],
+        )
 
         lengths = {
             len(timestamps),
@@ -170,14 +368,28 @@ class NobitexExchange(MarketDataProvider):
 
         return [
             Candle(
-                timestamp=int(timestamps[index]),
-                open=float(opens[index]),
-                high=float(highs[index]),
-                low=float(lows[index]),
-                close=float(closes[index]),
-                volume=float(volumes[index]),
+                timestamp=int(
+                    timestamps[index]
+                ),
+                open=float(
+                    opens[index]
+                ),
+                high=float(
+                    highs[index]
+                ),
+                low=float(
+                    lows[index]
+                ),
+                close=float(
+                    closes[index]
+                ),
+                volume=float(
+                    volumes[index]
+                ),
             )
-            for index in range(len(timestamps))
+            for index in range(
+                len(timestamps)
+            )
         ]
 
     def get_trades(
@@ -188,30 +400,53 @@ class NobitexExchange(MarketDataProvider):
         """
         Get recent public executed trades from Nobitex.
 
-        The provider normalizes the exchange response into the
-        provider-agnostic Trade model.
+        API request:
+
+            BTC
+                -> /v2/trades/BTCIRT
+
+            BTCIRT
+                -> /v2/trades/BTCIRT
+
+            BTCUSDT
+                -> /v2/trades/BTCUSDT
+
+        Domain model:
+
+            Trade.symbol
+                -> BTC
+
+        Keeping the model symbol as BASE preserves
+        backward compatibility and avoids changing the
+        existing Trade contract.
         """
 
         if not symbol:
-            raise ValueError("Symbol cannot be empty.")
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
 
         if limit <= 0:
             raise ValueError(
                 "Limit must be greater than zero."
             )
 
-        normalized_symbol = symbol.strip().upper()
+        normalized_symbol = (
+            self._normalize_market_symbol(
+                symbol
+            )
+        )
 
-        if normalized_symbol.endswith("IRT"):
-            market_symbol = normalized_symbol
-            source_symbol = normalized_symbol[:-3]
-        else:
-            market_symbol = f"{normalized_symbol}IRT"
-            source_symbol = normalized_symbol
+        base_symbol = (
+            self._extract_base_symbol(
+                normalized_symbol
+            )
+        )
 
         response = requests.get(
             self.BASE_URL
-            + f"/v2/trades/{market_symbol}",
+            + f"/v2/trades/"
+            f"{normalized_symbol}",
             timeout=10,
         )
 
@@ -221,23 +456,35 @@ class NobitexExchange(MarketDataProvider):
 
         if data.get("status") != "ok":
             raise ValueError(
-                f"Nobitex trades request failed: {data}"
+                "Nobitex trades request failed: "
+                f"{data}"
             )
 
-        raw_trades = data.get("trades", [])
+        raw_trades = data.get(
+            "trades",
+            [],
+        )
 
         trades: list[Trade] = []
 
         for item in raw_trades:
             trades.append(
                 Trade(
-                    timestamp=int(item["time"]),
-                    price=float(item["price"]),
-                    volume=float(item["volume"]),
-                    side=str(item["type"])
+                    timestamp=int(
+                        item["time"]
+                    ),
+                    price=float(
+                        item["price"]
+                    ),
+                    volume=float(
+                        item["volume"]
+                    ),
+                    side=str(
+                        item["type"]
+                    )
                     .strip()
                     .lower(),
-                    symbol=source_symbol,
+                    symbol=base_symbol,
                 )
             )
 
@@ -252,29 +499,51 @@ class NobitexExchange(MarketDataProvider):
         depth: int = 20,
     ) -> OrderBook:
         """
-        Get a Level 2 order book snapshot from Nobitex.
+        Get Level 2 order book from Nobitex.
+
+        API request:
+
+            BTC
+                -> /v3/orderbook/BTCIRT
+
+            BTCIRT
+                -> /v3/orderbook/BTCIRT
+
+            BTCUSDT
+                -> /v3/orderbook/BTCUSDT
+
+        Domain model:
+
+            OrderBook.symbol
+                -> BTC
         """
 
         if not symbol:
-            raise ValueError("Symbol cannot be empty.")
+            raise ValueError(
+                "Symbol cannot be empty."
+            )
 
         if depth <= 0:
             raise ValueError(
                 "Depth must be greater than zero."
             )
 
-        normalized_symbol = symbol.strip().upper()
+        normalized_symbol = (
+            self._normalize_market_symbol(
+                symbol
+            )
+        )
 
-        if normalized_symbol.endswith("IRT"):
-            market_symbol = normalized_symbol
-            source_symbol = normalized_symbol[:-3]
-        else:
-            market_symbol = f"{normalized_symbol}IRT"
-            source_symbol = normalized_symbol
+        base_symbol = (
+            self._extract_base_symbol(
+                normalized_symbol
+            )
+        )
 
         response = requests.get(
             self.BASE_URL
-            + f"/v3/orderbook/{market_symbol}",
+            + f"/v3/orderbook/"
+            f"{normalized_symbol}",
             timeout=10,
         )
 
@@ -284,31 +553,52 @@ class NobitexExchange(MarketDataProvider):
 
         if data.get("status") != "ok":
             raise ValueError(
-                f"Nobitex orderbook request failed: {data}"
+                "Nobitex orderbook request failed: "
+                f"{data}"
             )
 
-        raw_bids = data.get("bids", [])
-        raw_asks = data.get("asks", [])
+        raw_bids = data.get(
+            "bids",
+            [],
+        )
+
+        raw_asks = data.get(
+            "asks",
+            [],
+        )
 
         bids = [
             OrderBookLevel(
-                price=float(level[0]),
-                volume=float(level[1]),
+                price=float(
+                    level[0]
+                ),
+                volume=float(
+                    level[1]
+                ),
             )
             for level in raw_bids[:depth]
         ]
 
         asks = [
             OrderBookLevel(
-                price=float(level[0]),
-                volume=float(level[1]),
+                price=float(
+                    level[0]
+                ),
+                volume=float(
+                    level[1]
+                ),
             )
             for level in raw_asks[:depth]
         ]
 
         return OrderBook(
-            symbol=source_symbol,
-            timestamp=int(data.get("lastUpdate", 0)),
+            symbol=base_symbol,
+            timestamp=int(
+                data.get(
+                    "lastUpdate",
+                    0,
+                )
+            ),
             bids=bids,
             asks=asks,
         )
