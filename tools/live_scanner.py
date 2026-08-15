@@ -5,10 +5,17 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parents[1]
+)
 
 if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(
+        0,
+        str(PROJECT_ROOT),
+    )
 
 from core.candle_store import CandleStore
 from core.market_registry import (
@@ -35,18 +42,23 @@ class ScanSummary:
     no_structure_setup: int
     no_historical_data: int
     insufficient_candles: int
+    warming_up: int
     errors: int
     grades: dict[str, int]
 
 
 class LiveScanner:
     """
-    Live scanner with BASE/USDT as the primary
-    analytical market.
+    USDT-only analytical scanner.
 
-    BASE/IRT is not the analytical source.
+    Production provider:
+        Gate.io
 
-    USDT/IRT is only the local quote bridge.
+    Analysis:
+        BASEUSDT
+
+    Legacy IRT registry compatibility remains available,
+    but the analytical flow uses BASEUSDT only.
     """
 
     def __init__(
@@ -54,10 +66,17 @@ class LiveScanner:
         market_service: MarketService | None = None,
         candle_store: CandleStore | None = None,
         trade_store: TradeStore | None = None,
-        confluence_service: LiveConfluenceService | None = None,
-        market_registry: MarketRegistry | None = None,
+        confluence_service: (
+            LiveConfluenceService | None
+        ) = None,
+        market_registry: (
+            MarketRegistry | None
+        ) = None,
         timeframe: str = "60",
         candle_limit: int = 200,
+        historical_trade_lookback_seconds: int = 3600,
+        historical_trade_max_pages: int = 20,
+        minimum_historical_trades: int = 50,
     ) -> None:
         self.market_service = (
             market_service
@@ -99,13 +118,51 @@ class LiveScanner:
             candle_limit
         )
 
+        self.historical_trade_lookback_seconds = int(
+            historical_trade_lookback_seconds
+        )
+
+        self.historical_trade_max_pages = int(
+            historical_trade_max_pages
+        )
+
+        self.minimum_historical_trades = int(
+            minimum_historical_trades
+        )
+
+        if (
+            self.historical_trade_lookback_seconds
+            <= 0
+        ):
+            raise ValueError(
+                "historical_trade_lookback_seconds "
+                "must be greater than zero."
+            )
+
+        if (
+            self.historical_trade_max_pages
+            <= 0
+        ):
+            raise ValueError(
+                "historical_trade_max_pages "
+                "must be greater than zero."
+            )
+
+        if (
+            self.minimum_historical_trades
+            <= 0
+        ):
+            raise ValueError(
+                "minimum_historical_trades "
+                "must be greater than zero."
+            )
+
     @staticmethod
     def _extract_usdt_markets(
         markets: dict,
     ) -> list[str]:
         """
-        Discover BASEUSDT analysis markets
-        directly from Nobitex.
+        Extract BASEUSDT symbols from market statistics.
         """
 
         stats = markets.get(
@@ -113,31 +170,31 @@ class LiveScanner:
             {},
         )
 
-        analysis_markets: set[str] = set()
+        symbols: set[str] = set()
 
         for key in stats:
             value = (
                 str(key)
                 .strip()
                 .upper()
+                .replace("-", "")
+                .replace("_", "")
             )
 
             if not value.endswith(
-                "-USDT"
+                "USDT"
             ):
                 continue
 
-            base = value[:-5]
+            base = value[:-4]
 
-            if not base:
-                continue
-
-            analysis_markets.add(
-                f"{base}USDT"
-            )
+            if base:
+                symbols.add(
+                    f"{base}USDT"
+                )
 
         return sorted(
-            analysis_markets
+            symbols
         )
 
     @staticmethod
@@ -194,37 +251,160 @@ class LiveScanner:
         if descriptor is not None:
             return descriptor
 
-        base = (
-            self._base_from_usdt_market(
+        return (
+            self.market_registry.register_symbol(
                 value
             )
         )
 
-        return MarketDescriptor(
-            market_symbol=value,
-            base_asset=base,
-            quote_asset="USDT",
-            analysis_market=value,
-            execution_market=(
-                f"{base}IRT"
+    def _provider_supports_historical_trades(
+        self,
+    ) -> bool:
+        """
+        Detect historical-trade support through the
+        MarketService abstraction.
+
+        This deliberately does not inspect
+        market_service.provider so FakeMarketService and
+        other test doubles remain compatible.
+        """
+
+        return callable(
+            getattr(
+                self.market_service,
+                "historical_trades",
+                None,
+            )
+        )
+
+    def _store_count(
+        self,
+        symbol: str,
+    ) -> int:
+        count_method = getattr(
+            self.trade_store,
+            "count",
+            None,
+        )
+
+        if not callable(
+            count_method
+        ):
+            return 0
+
+        return int(
+            count_method(
+                symbol
+            )
+        )
+
+    def _store_latest_timestamp(
+        self,
+        symbol: str,
+    ) -> int | None:
+        method = getattr(
+            self.trade_store,
+            "latest_timestamp",
+            None,
+        )
+
+        if not callable(
+            method
+        ):
+            return None
+
+        return method(
+            symbol
+        )
+
+    def _bootstrap_historical_trades(
+        self,
+        descriptor: MarketDescriptor,
+        candles,
+    ) -> tuple[int, bool]:
+        """
+        Bootstrap historical trades when supported.
+
+        Returns:
+
+            trade_count
+            historical_trade_support
+        """
+
+        if not candles:
+            return (
+                self._store_count(
+                    descriptor.base_asset
+                ),
+                self._provider_supports_historical_trades(),
+            )
+
+        supports = (
+            self._provider_supports_historical_trades()
+        )
+
+        if not supports:
+            return (
+                self._store_count(
+                    descriptor.base_asset
+                ),
+                False,
+            )
+
+        latest_candle_timestamp_ms = (
+            int(candles[-1].timestamp)
+            * 1000
+        )
+
+        trades = (
+            self.market_service.historical_trades(
+                symbol=descriptor.analysis_market,
+                end_timestamp_ms=(
+                    latest_candle_timestamp_ms
+                ),
+                lookback_seconds=(
+                    self.historical_trade_lookback_seconds
+                ),
+                max_pages=(
+                    self.historical_trade_max_pages
+                ),
+            )
+        )
+
+        save_method = getattr(
+            self.trade_store,
+            "save_trades",
+            None,
+        )
+
+        if (
+            trades
+            and callable(
+                save_method
+            )
+        ):
+            save_method(
+                trades
+            )
+
+        return (
+            self._store_count(
+                descriptor.base_asset
             ),
+            True,
         )
 
     def scan_market(
         self,
         analysis_market: str,
     ) -> LiveConfluenceResult:
-        """
-        Scan one BASE/USDT analytical market.
-        """
-
         descriptor = (
             self._resolve_market(
                 analysis_market
             )
         )
 
-        bootstrap_candles = (
+        candles = (
             self.market_service.history(
                 descriptor.analysis_market,
                 resolution=self.timeframe,
@@ -232,8 +412,37 @@ class LiveScanner:
             )
         )
 
+        (
+            trade_count,
+            historical_support,
+        ) = (
+            self._bootstrap_historical_trades(
+                descriptor,
+                candles,
+            )
+        )
+
+        if (
+            historical_support
+            and
+            trade_count
+            < self.minimum_historical_trades
+        ):
+            return LiveConfluenceResult(
+                symbol=descriptor.base_asset,
+                setup=None,
+                confluence=None,
+                status="WARMING_UP",
+                reason=(
+                    "Historical trade coverage is "
+                    f"insufficient: "
+                    f"{trade_count} < "
+                    f"{self.minimum_historical_trades}."
+                ),
+            )
+
         latest_trade_timestamp = (
-            self.trade_store.latest_timestamp(
+            self._store_latest_timestamp(
                 descriptor.base_asset
             )
         )
@@ -241,7 +450,7 @@ class LiveScanner:
         return (
             self.confluence_service.evaluate(
                 symbol=descriptor.base_asset,
-                candles=bootstrap_candles,
+                candles=candles,
                 latest_trade_timestamp=(
                     latest_trade_timestamp
                 ),
@@ -253,16 +462,7 @@ class LiveScanner:
     def scan(
         self,
         symbols: list[str] | None = None,
-    ) -> tuple[
-        list[
-            tuple[
-                str,
-                MarketDescriptor,
-                LiveConfluenceResult,
-            ]
-        ],
-        ScanSummary,
-    ]:
+    ):
         if symbols is None:
             markets = (
                 self.market_service.markets()
@@ -274,14 +474,20 @@ class LiveScanner:
                 )
             )
 
-        results = []
+        results: list[
+            tuple[
+                str,
+                MarketDescriptor,
+                LiveConfluenceResult,
+            ]
+        ] = []
 
         status_counter = Counter()
         grade_counter = Counter()
 
-        for analysis_market in symbols:
+        for symbol in symbols:
             analysis_market = (
-                analysis_market
+                symbol
                 .strip()
                 .upper()
             )
@@ -334,16 +540,15 @@ class LiveScanner:
                 result.status
             ] += 1
 
-            if (
-                result.confluence
-                is not None
-            ):
+            if result.confluence is not None:
                 grade_counter[
                     result.confluence.grade
                 ] += 1
 
         summary = ScanSummary(
-            total_symbols=len(symbols),
+            total_symbols=len(
+                symbols
+            ),
             evaluated=status_counter[
                 "EVALUATED"
             ],
@@ -371,6 +576,9 @@ class LiveScanner:
             insufficient_candles=status_counter[
                 "INSUFFICIENT_CANDLES"
             ],
+            warming_up=status_counter[
+                "WARMING_UP"
+            ],
             errors=(
                 status_counter["ERROR"]
                 + status_counter[
@@ -392,22 +600,20 @@ class LiveScanner:
 
 
 def print_results(
-    results: list[
-        tuple[
-            str,
-            MarketDescriptor,
-            LiveConfluenceResult,
-        ]
-    ],
+    results,
     summary: ScanSummary,
 ) -> None:
     print()
     print("=" * 150)
+
     print(
         "LIVE CONFLUENCE SCANNER "
-        "- USDT ANALYSIS"
+        "- GATE.IO USDT ANALYSIS"
     )
-    print("=" * 150)
+
+    print(
+        "=" * 150
+    )
 
     print(
         f"Total USDT markets : "
@@ -417,6 +623,11 @@ def print_results(
     print(
         f"Evaluated          : "
         f"{summary.evaluated}"
+    )
+
+    print(
+        f"WARMING_UP         : "
+        f"{summary.warming_up}"
     )
 
     print(
@@ -465,8 +676,13 @@ def print_results(
     )
 
     print()
-    print("GRADE DISTRIBUTION")
-    print("-" * 150)
+    print(
+        "GRADE DISTRIBUTION"
+    )
+
+    print(
+        "-" * 150
+    )
 
     for grade in (
         "A+",
@@ -481,8 +697,13 @@ def print_results(
         )
 
     print()
-    print("MARKET RESULTS")
-    print("-" * 150)
+    print(
+        "MARKET RESULTS"
+    )
+
+    print(
+        "-" * 150
+    )
 
     print(
         f"{'BASE':<12} "
@@ -495,7 +716,9 @@ def print_results(
         f"REASON"
     )
 
-    print("-" * 150)
+    print(
+        "-" * 150
+    )
 
     for (
         base,
@@ -508,10 +731,7 @@ def print_results(
             else "-"
         )
 
-        if (
-            result.confluence
-            is not None
-        ):
+        if result.confluence is not None:
             print(
                 f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
@@ -536,13 +756,18 @@ def print_results(
             )
 
     print()
-    print("=" * 150)
+    print(
+        "=" * 150
+    )
 
 
 def main() -> None:
     scanner = LiveScanner(
         timeframe="60",
         candle_limit=200,
+        historical_trade_lookback_seconds=3600,
+        historical_trade_max_pages=20,
+        minimum_historical_trades=50,
     )
 
     results, summary = scanner.scan()
