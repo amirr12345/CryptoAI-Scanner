@@ -24,10 +24,10 @@ from microstructure.structure_break import (
 from microstructure.structure_setup import (
     StructureSetupEngine,
 )
+from models.candle import Candle
 from models.confluence_result import (
     ConfluenceResult,
 )
-from models.candle import Candle
 from models.structure_setup import (
     StructureSetup,
 )
@@ -39,7 +39,7 @@ from services.live_data_freshness import (
 @dataclass(slots=True, frozen=True)
 class LiveConfluenceResult:
     """
-    Result of the complete live structure/confluence pipeline.
+    Result of the live structure/confluence pipeline.
     """
 
     symbol: str
@@ -53,15 +53,33 @@ class LiveConfluenceService:
     """
     Live structure/confluence pipeline.
 
-    Candle source priority:
+    Pipeline:
 
-        1. Live CandleStore
-        2. Explicit candles argument
+        Candles
+          ↓
+        Freshness
+          ↓
+        Market Structure
+          ↓
+        Structure Break
+          ↓
+        Liquidity Sweep
+          ↓
+        Structure Setup
+          ↓
+        Historical Context
+          ↓
+        Historical Confluence
 
-    Live CandleStore is the preferred source because it is fed
-    by the Nobitex WebSocket candle stream.
+    Candidate-first support:
 
-    Historical REST candles remain useful as bootstrap data.
+        find_candidate()
+
+    runs only through Structure Setup and DOES NOT
+    require Historical Trades.
+
+    This allows LiveScanner to avoid expensive historical
+    trade downloads for markets that have no valid setup.
     """
 
     def __init__(
@@ -135,8 +153,8 @@ class LiveConfluenceService:
             else CandleStore()
         )
 
-        self.min_candles_for_structure = (
-            int(min_candles_for_structure)
+        self.min_candles_for_structure = int(
+            min_candles_for_structure
         )
 
     def get_live_candles(
@@ -149,12 +167,8 @@ class LiveConfluenceService:
         """
         Return the best available candle set.
 
-        The WebSocket CandleStore is preferred when it has enough
-        candles. Otherwise the explicitly supplied bootstrap/history
-        candles are used.
-
-        When a live candle exists, it replaces the same timestamp
-        in the bootstrap series or is appended when newer.
+        Live CandleStore is preferred.
+        Bootstrap candles are used as fallback.
         """
 
         normalized_symbol = (
@@ -183,7 +197,9 @@ class LiveConfluenceService:
         }
 
         for candle in stored:
-            merged[int(candle.timestamp)] = candle
+            merged[
+                int(candle.timestamp)
+            ] = candle
 
         ordered = sorted(
             merged.values(),
@@ -199,33 +215,33 @@ class LiveConfluenceService:
         symbol: str,
         timeframe: str = "60",
     ) -> Candle | None:
-        """
-        Return the latest WebSocket candle from CandleStore.
-        """
-
         return self.candle_store.latest(
             symbol=symbol,
             timeframe=timeframe,
         )
 
-    def evaluate(
+    def _prepare_analysis(
         self,
         symbol: str,
         candles=None,
         latest_trade_timestamp: int | None = None,
         timeframe: str = "60",
         candle_limit: int = 200,
-        swing_window: int = 2,
-        displacement_pct: float = 0.15,
-        max_bars_after_sweep: int = 10,
-        lookback_seconds: int = 3600,
-    ) -> LiveConfluenceResult:
+    ) -> tuple[
+        list[Candle],
+        Candle,
+        LiveConfluenceResult | None,
+    ]:
         """
-        Run the complete live analysis pipeline.
+        Prepare live candles and validate freshness.
 
-        Live WebSocket candles are preferred.
+        Returns:
 
-        Bootstrap candles may be supplied through `candles`.
+            analysis_candles
+            latest_candle
+            early_result
+
+        early_result is not None when the pipeline must stop.
         """
 
         normalized_symbol = (
@@ -249,17 +265,17 @@ class LiveConfluenceService:
         )
 
         if not analysis_candles:
-            return LiveConfluenceResult(
-                symbol=normalized_symbol,
-                setup=None,
-                confluence=None,
-                status="NO_CANDLES",
-                reason="No candles were available.",
+            return (
+                [],
+                None,
+                LiveConfluenceResult(
+                    symbol=normalized_symbol,
+                    setup=None,
+                    confluence=None,
+                    status="NO_CANDLES",
+                    reason="No candles were available.",
+                ),
             )
-
-        # --------------------------------------------------
-        # Freshness reference
-        # --------------------------------------------------
 
         latest_candle = (
             live_candle
@@ -289,52 +305,102 @@ class LiveConfluenceService:
                 ),
             )
         except Exception as exc:
-            return LiveConfluenceResult(
-                symbol=normalized_symbol,
-                setup=None,
-                confluence=None,
-                status="FRESHNESS_CHECK_ERROR",
-                reason=str(exc),
+            return (
+                analysis_candles,
+                latest_candle,
+                LiveConfluenceResult(
+                    symbol=normalized_symbol,
+                    setup=None,
+                    confluence=None,
+                    status="FRESHNESS_CHECK_ERROR",
+                    reason=str(exc),
+                ),
             )
 
         if not freshness.fresh:
-            return LiveConfluenceResult(
-                symbol=normalized_symbol,
-                setup=None,
-                confluence=None,
-                status="STALE_CANDLES",
-                reason=(
-                    "Latest candle is stale: "
-                    f"{freshness.candle_lag_seconds}s "
-                    f"> "
-                    f"{freshness.max_allowed_lag_seconds}s."
+            return (
+                analysis_candles,
+                latest_candle,
+                LiveConfluenceResult(
+                    symbol=normalized_symbol,
+                    setup=None,
+                    confluence=None,
+                    status="STALE_CANDLES",
+                    reason=(
+                        "Latest candle is stale: "
+                        f"{freshness.candle_lag_seconds}s "
+                        f"> "
+                        f"{freshness.max_allowed_lag_seconds}s."
+                    ),
                 ),
             )
 
-        # --------------------------------------------------
-        # Structure needs enough candles
-        # --------------------------------------------------
-
-        if (
-            len(analysis_candles)
-            < self.min_candles_for_structure
-        ):
-            return LiveConfluenceResult(
-                symbol=normalized_symbol,
-                setup=None,
-                confluence=None,
-                status="INSUFFICIENT_CANDLES",
-                reason=(
-                    f"Only {len(analysis_candles)} candles "
-                    f"available; "
-                    f"{self.min_candles_for_structure} "
-                    f"required."
+        if len(
+            analysis_candles
+        ) < self.min_candles_for_structure:
+            return (
+                analysis_candles,
+                latest_candle,
+                LiveConfluenceResult(
+                    symbol=normalized_symbol,
+                    setup=None,
+                    confluence=None,
+                    status="INSUFFICIENT_CANDLES",
+                    reason=(
+                        f"Only {len(analysis_candles)} candles "
+                        f"available; "
+                        f"{self.min_candles_for_structure} "
+                        f"required."
+                    ),
                 ),
             )
 
-        # --------------------------------------------------
-        # Market Structure
-        # --------------------------------------------------
+        return (
+            analysis_candles,
+            latest_candle,
+            None,
+        )
+
+    def find_candidate(
+        self,
+        symbol: str,
+        candles=None,
+        timeframe: str = "60",
+        candle_limit: int = 200,
+        swing_window: int = 2,
+        displacement_pct: float = 0.15,
+        max_bars_after_sweep: int = 10,
+    ) -> LiveConfluenceResult:
+        """
+        Candidate-first pipeline.
+
+        Stops immediately after Structure Setup.
+
+        IMPORTANT:
+            No HistoricalContextEngine call is made here.
+
+        This is intentionally cheap compared with the full
+        confluence evaluation.
+        """
+
+        normalized_symbol = (
+            symbol.strip().upper()
+        )
+
+        (
+            analysis_candles,
+            _latest_candle,
+            early_result,
+        ) = self._prepare_analysis(
+            symbol=normalized_symbol,
+            candles=candles,
+            latest_trade_timestamp=None,
+            timeframe=timeframe,
+            candle_limit=candle_limit,
+        )
+
+        if early_result is not None:
+            return early_result
 
         structure = self.market_structure.calculate(
             candles=analysis_candles,
@@ -351,10 +417,6 @@ class LiveConfluenceService:
                     "No confirmed market structure swings."
                 ),
             )
-
-        # --------------------------------------------------
-        # Structure Break
-        # --------------------------------------------------
 
         structure_breaks = (
             self.structure_break.calculate(
@@ -375,13 +437,11 @@ class LiveConfluenceService:
                 ),
             )
 
-        # --------------------------------------------------
-        # Liquidity Sweep
-        # --------------------------------------------------
-
-        sweeps = self.liquidity_sweep.calculate(
-            candles=analysis_candles,
-            structure=structure,
+        sweeps = (
+            self.liquidity_sweep.calculate(
+                candles=analysis_candles,
+                structure=structure,
+            )
         )
 
         if not sweeps.events:
@@ -395,18 +455,16 @@ class LiveConfluenceService:
                 ),
             )
 
-        # --------------------------------------------------
-        # Structure Setup
-        # --------------------------------------------------
-
-        setups = self.structure_setup.calculate(
-            sweeps=sweeps.events,
-            structure_breaks=(
-                structure_breaks.events
-            ),
-            max_bars_after_sweep=(
-                max_bars_after_sweep
-            ),
+        setups = (
+            self.structure_setup.calculate(
+                sweeps=sweeps.events,
+                structure_breaks=(
+                    structure_breaks.events
+                ),
+                max_bars_after_sweep=(
+                    max_bars_after_sweep
+                ),
+            )
         )
 
         if not setups.setups:
@@ -429,9 +487,74 @@ class LiveConfluenceService:
             ),
         )
 
-        # --------------------------------------------------
-        # Historical Context
-        # --------------------------------------------------
+        return LiveConfluenceResult(
+            symbol=normalized_symbol,
+            setup=latest_setup,
+            confluence=None,
+            status="CANDIDATE",
+            reason=(
+                "Valid Sweep + MSS structure "
+                "candidate detected."
+            ),
+        )
+
+    def evaluate(
+        self,
+        symbol: str,
+        candles=None,
+        latest_trade_timestamp: int | None = None,
+        timeframe: str = "60",
+        candle_limit: int = 200,
+        swing_window: int = 2,
+        displacement_pct: float = 0.15,
+        max_bars_after_sweep: int = 10,
+        lookback_seconds: int = 3600,
+    ) -> LiveConfluenceResult:
+        """
+        Run complete live analysis.
+
+        Candidate-first logic is centralized here as well,
+        so the pipeline has one canonical implementation.
+        """
+
+        candidate = self.find_candidate(
+            symbol=symbol,
+            candles=candles,
+            timeframe=timeframe,
+            candle_limit=candle_limit,
+            swing_window=swing_window,
+            displacement_pct=displacement_pct,
+            max_bars_after_sweep=max_bars_after_sweep,
+        )
+
+        if candidate.status != "CANDIDATE":
+            return candidate
+
+        normalized_symbol = (
+            symbol.strip().upper()
+        )
+
+        analysis_candles = (
+            self.get_live_candles(
+                symbol=normalized_symbol,
+                fallback_candles=candles,
+                timeframe=timeframe,
+                limit=candle_limit,
+            )
+        )
+
+        latest_setup = candidate.setup
+
+        if latest_setup is None:
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=None,
+                confluence=None,
+                status="NO_STRUCTURE_SETUP",
+                reason=(
+                    "Candidate result did not contain a setup."
+                ),
+            )
 
         try:
             context = (
@@ -463,10 +586,6 @@ class LiveConfluenceService:
                 status="HISTORICAL_CONTEXT_ERROR",
                 reason=str(exc),
             )
-
-        # --------------------------------------------------
-        # Historical Confluence
-        # --------------------------------------------------
 
         try:
             confluence = (
