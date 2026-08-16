@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[1]
+    Path(__file__).resolve().parents[1]
 )
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -49,16 +47,28 @@ class ScanSummary:
 
 class LiveScanner:
     """
-    USDT-only analytical scanner.
+    Candidate-first Gate.io USDT scanner.
 
-    Production provider:
-        Gate.io
+    Production pipeline:
 
-    Analysis:
-        BASEUSDT
+        Gate.io candles
+              ↓
+        Structure / MSS / Sweep
+              ↓
+        Candidate?
+          ├── No  → STOP
+          └── Yes
+                ↓
+        Historical Trades
+                ↓
+        Historical Context
+                ↓
+        Confluence
 
-    Legacy IRT registry compatibility remains available,
-    but the analytical flow uses BASEUSDT only.
+    Backward compatibility:
+
+        Test doubles or legacy confluence services that do not
+        implement find_candidate() fall back to evaluate().
     """
 
     def __init__(
@@ -66,16 +76,12 @@ class LiveScanner:
         market_service: MarketService | None = None,
         candle_store: CandleStore | None = None,
         trade_store: TradeStore | None = None,
-        confluence_service: (
-            LiveConfluenceService | None
-        ) = None,
-        market_registry: (
-            MarketRegistry | None
-        ) = None,
+        confluence_service: LiveConfluenceService | None = None,
+        market_registry: MarketRegistry | None = None,
         timeframe: str = "60",
         candle_limit: int = 200,
         historical_trade_lookback_seconds: int = 3600,
-        historical_trade_max_pages: int = 20,
+        historical_trade_max_pages: int = 3,
         minimum_historical_trades: int = 50,
     ) -> None:
         self.market_service = (
@@ -130,41 +136,10 @@ class LiveScanner:
             minimum_historical_trades
         )
 
-        if (
-            self.historical_trade_lookback_seconds
-            <= 0
-        ):
-            raise ValueError(
-                "historical_trade_lookback_seconds "
-                "must be greater than zero."
-            )
-
-        if (
-            self.historical_trade_max_pages
-            <= 0
-        ):
-            raise ValueError(
-                "historical_trade_max_pages "
-                "must be greater than zero."
-            )
-
-        if (
-            self.minimum_historical_trades
-            <= 0
-        ):
-            raise ValueError(
-                "minimum_historical_trades "
-                "must be greater than zero."
-            )
-
     @staticmethod
     def _extract_usdt_markets(
         markets: dict,
     ) -> list[str]:
-        """
-        Extract BASEUSDT symbols from market statistics.
-        """
-
         stats = markets.get(
             "stats",
             {},
@@ -227,15 +202,15 @@ class LiveScanner:
 
     def _resolve_market(
         self,
-        analysis_market: str,
+        symbol: str,
     ) -> MarketDescriptor:
-        value = (
-            analysis_market
+        normalized = (
+            symbol
             .strip()
             .upper()
         )
 
-        if not value.endswith(
+        if not normalized.endswith(
             "USDT"
         ):
             raise ValueError(
@@ -244,7 +219,7 @@ class LiveScanner:
 
         descriptor = (
             self.market_registry.get(
-                value
+                normalized
             )
         )
 
@@ -253,27 +228,7 @@ class LiveScanner:
 
         return (
             self.market_registry.register_symbol(
-                value
-            )
-        )
-
-    def _provider_supports_historical_trades(
-        self,
-    ) -> bool:
-        """
-        Detect historical-trade support through the
-        MarketService abstraction.
-
-        This deliberately does not inspect
-        market_service.provider so FakeMarketService and
-        other test doubles remain compatible.
-        """
-
-        return callable(
-            getattr(
-                self.market_service,
-                "historical_trades",
-                None,
+                normalized
             )
         )
 
@@ -281,21 +236,17 @@ class LiveScanner:
         self,
         symbol: str,
     ) -> int:
-        count_method = getattr(
+        method = getattr(
             self.trade_store,
             "count",
             None,
         )
 
-        if not callable(
-            count_method
-        ):
+        if not callable(method):
             return 0
 
         return int(
-            count_method(
-                symbol
-            )
+            method(symbol)
         )
 
     def _store_latest_timestamp(
@@ -308,42 +259,69 @@ class LiveScanner:
             None,
         )
 
-        if not callable(
-            method
-        ):
+        if not callable(method):
             return None
 
-        return method(
-            symbol
+        return method(symbol)
+
+    def _has_candidate_pipeline(
+        self,
+    ) -> bool:
+        return callable(
+            getattr(
+                self.confluence_service,
+                "find_candidate",
+                None,
+            )
+        )
+
+    def _legacy_evaluate(
+        self,
+        descriptor: MarketDescriptor,
+        candles,
+    ) -> LiveConfluenceResult:
+        """
+        Backward-compatible path for older FakeConfluenceService
+        / test doubles.
+
+        Production LiveConfluenceService has find_candidate(),
+        so production never uses this path.
+        """
+
+        evaluate = getattr(
+            self.confluence_service,
+            "evaluate",
+            None,
+        )
+
+        if not callable(evaluate):
+            raise AttributeError(
+                "Configured confluence service must implement "
+                "find_candidate() or evaluate()."
+            )
+
+        return evaluate(
+            symbol=descriptor.base_asset,
+            candles=candles,
+            latest_trade_timestamp=(
+                self._store_latest_timestamp(
+                    descriptor.base_asset
+                )
+            ),
+            timeframe=self.timeframe,
+            candle_limit=self.candle_limit,
         )
 
     def _bootstrap_historical_trades(
         self,
         descriptor: MarketDescriptor,
-        candles,
+        candidate: LiveConfluenceResult,
     ) -> tuple[int, bool]:
         """
-        Bootstrap historical trades when supported.
-
-        Returns:
-
-            trade_count
-            historical_trade_support
+        Historical trades are fetched only for a valid candidate.
         """
 
-        if not candles:
-            return (
-                self._store_count(
-                    descriptor.base_asset
-                ),
-                self._provider_supports_historical_trades(),
-            )
-
-        supports = (
-            self._provider_supports_historical_trades()
-        )
-
-        if not supports:
+        if candidate.setup is None:
             return (
                 self._store_count(
                     descriptor.base_asset
@@ -351,24 +329,34 @@ class LiveScanner:
                 False,
             )
 
-        latest_candle_timestamp_ms = (
-            int(candles[-1].timestamp)
+        method = getattr(
+            self.market_service,
+            "historical_trades",
+            None,
+        )
+
+        if not callable(method):
+            return (
+                self._store_count(
+                    descriptor.base_asset
+                ),
+                False,
+            )
+
+        setup_timestamp_ms = (
+            int(candidate.setup.timestamp)
             * 1000
         )
 
-        trades = (
-            self.market_service.historical_trades(
-                symbol=descriptor.analysis_market,
-                end_timestamp_ms=(
-                    latest_candle_timestamp_ms
-                ),
-                lookback_seconds=(
-                    self.historical_trade_lookback_seconds
-                ),
-                max_pages=(
-                    self.historical_trade_max_pages
-                ),
-            )
+        trades = method(
+            symbol=descriptor.analysis_market,
+            end_timestamp_ms=setup_timestamp_ms,
+            lookback_seconds=(
+                self.historical_trade_lookback_seconds
+            ),
+            max_pages=(
+                self.historical_trade_max_pages
+            ),
         )
 
         save_method = getattr(
@@ -379,9 +367,7 @@ class LiveScanner:
 
         if (
             trades
-            and callable(
-                save_method
-            )
+            and callable(save_method)
         ):
             save_method(
                 trades
@@ -412,25 +398,55 @@ class LiveScanner:
             )
         )
 
+        # --------------------------------------------------
+        # Compatibility path for existing test doubles.
+        # --------------------------------------------------
+
+        if not self._has_candidate_pipeline():
+            return self._legacy_evaluate(
+                descriptor=descriptor,
+                candles=candles,
+            )
+
+        # --------------------------------------------------
+        # Production Candidate-first path.
+        # --------------------------------------------------
+
+        candidate = (
+            self.confluence_service.find_candidate(
+                symbol=descriptor.base_asset,
+                candles=candles,
+                timeframe=self.timeframe,
+                candle_limit=self.candle_limit,
+            )
+        )
+
+        if candidate.status != "CANDIDATE":
+            return candidate
+
+        # --------------------------------------------------
+        # Historical trades ONLY for candidates.
+        # --------------------------------------------------
+
         (
             trade_count,
-            historical_support,
+            historical_supported,
         ) = (
             self._bootstrap_historical_trades(
-                descriptor,
-                candles,
+                descriptor=descriptor,
+                candidate=candidate,
             )
         )
 
         if (
-            historical_support
+            historical_supported
             and
             trade_count
             < self.minimum_historical_trades
         ):
             return LiveConfluenceResult(
                 symbol=descriptor.base_asset,
-                setup=None,
+                setup=candidate.setup,
                 confluence=None,
                 status="WARMING_UP",
                 reason=(
@@ -441,22 +457,38 @@ class LiveScanner:
                 ),
             )
 
-        latest_trade_timestamp = (
-            self._store_latest_timestamp(
-                descriptor.base_asset
-            )
+        # --------------------------------------------------
+        # Final Historical Context + Confluence.
+        # --------------------------------------------------
+
+        evaluate = getattr(
+            self.confluence_service,
+            "evaluate",
+            None,
         )
 
-        return (
-            self.confluence_service.evaluate(
+        if not callable(evaluate):
+            return LiveConfluenceResult(
                 symbol=descriptor.base_asset,
-                candles=candles,
-                latest_trade_timestamp=(
-                    latest_trade_timestamp
+                setup=candidate.setup,
+                confluence=None,
+                status="ERROR",
+                reason=(
+                    "Confluence service does not implement "
+                    "evaluate()."
                 ),
-                timeframe=self.timeframe,
-                candle_limit=self.candle_limit,
             )
+
+        return evaluate(
+            symbol=descriptor.base_asset,
+            candles=candles,
+            latest_trade_timestamp=(
+                self._store_latest_timestamp(
+                    descriptor.base_asset
+                )
+            ),
+            timeframe=self.timeframe,
+            candle_limit=self.candle_limit,
         )
 
     def scan(
@@ -474,13 +506,7 @@ class LiveScanner:
                 )
             )
 
-        results: list[
-            tuple[
-                str,
-                MarketDescriptor,
-                LiveConfluenceResult,
-            ]
-        ] = []
+        results = []
 
         status_counter = Counter()
         grade_counter = Counter()
@@ -611,9 +637,7 @@ def print_results(
         "- GATE.IO USDT ANALYSIS"
     )
 
-    print(
-        "=" * 150
-    )
+    print("=" * 150)
 
     print(
         f"Total USDT markets : "
@@ -676,13 +700,8 @@ def print_results(
     )
 
     print()
-    print(
-        "GRADE DISTRIBUTION"
-    )
-
-    print(
-        "-" * 150
-    )
+    print("GRADE DISTRIBUTION")
+    print("-" * 150)
 
     for grade in (
         "A+",
@@ -697,13 +716,8 @@ def print_results(
         )
 
     print()
-    print(
-        "MARKET RESULTS"
-    )
-
-    print(
-        "-" * 150
-    )
+    print("MARKET RESULTS")
+    print("-" * 150)
 
     print(
         f"{'BASE':<12} "
@@ -716,9 +730,7 @@ def print_results(
         f"REASON"
     )
 
-    print(
-        "-" * 150
-    )
+    print("-" * 150)
 
     for (
         base,
@@ -756,9 +768,7 @@ def print_results(
             )
 
     print()
-    print(
-        "=" * 150
-    )
+    print("=" * 150)
 
 
 def main() -> None:
@@ -766,15 +776,15 @@ def main() -> None:
         timeframe="60",
         candle_limit=200,
         historical_trade_lookback_seconds=3600,
-        historical_trade_max_pages=20,
+        historical_trade_max_pages=3,
         minimum_historical_trades=50,
     )
 
     results, summary = scanner.scan()
 
     print_results(
-        results=results,
-        summary=summary,
+        results,
+        summary,
     )
 
 
