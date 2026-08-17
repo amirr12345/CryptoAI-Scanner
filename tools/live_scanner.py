@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+)
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,7 +55,11 @@ class LiveScanner:
 
     Production pipeline:
 
-        Gate.io candles
+        Gate.io markets
+              ↓
+        Top N USDT by 24h quote volume
+              ↓
+        Parallel candle bootstrap
               ↓
         Structure / MSS / Sweep
               ↓
@@ -65,10 +73,12 @@ class LiveScanner:
                 ↓
         Confluence
 
-    Backward compatibility:
+    Performance:
 
-        Test doubles or legacy confluence services that do not
-        implement find_candidate() fall back to evaluate().
+        Candle requests are fetched concurrently using a bounded
+        ThreadPoolExecutor.
+
+    Historical trades remain candidate-only.
     """
 
     def __init__(
@@ -76,13 +86,19 @@ class LiveScanner:
         market_service: MarketService | None = None,
         candle_store: CandleStore | None = None,
         trade_store: TradeStore | None = None,
-        confluence_service: LiveConfluenceService | None = None,
-        market_registry: MarketRegistry | None = None,
+        confluence_service: (
+            LiveConfluenceService | None
+        ) = None,
+        market_registry: (
+            MarketRegistry | None
+        ) = None,
         timeframe: str = "60",
         candle_limit: int = 200,
         historical_trade_lookback_seconds: int = 3600,
         historical_trade_max_pages: int = 3,
         minimum_historical_trades: int = 50,
+        max_symbols: int = 100,
+        candle_workers: int = 10,
     ) -> None:
         self.market_service = (
             market_service
@@ -136,18 +152,84 @@ class LiveScanner:
             minimum_historical_trades
         )
 
+        self.max_symbols = int(
+            max_symbols
+        )
+
+        self.candle_workers = int(
+            candle_workers
+        )
+
+        if self.candle_limit <= 0:
+            raise ValueError(
+                "candle_limit must be greater than zero."
+            )
+
+        if (
+            self.historical_trade_lookback_seconds
+            <= 0
+        ):
+            raise ValueError(
+                "historical_trade_lookback_seconds "
+                "must be greater than zero."
+            )
+
+        if (
+            self.historical_trade_max_pages
+            <= 0
+        ):
+            raise ValueError(
+                "historical_trade_max_pages "
+                "must be greater than zero."
+            )
+
+        if (
+            self.minimum_historical_trades
+            <= 0
+        ):
+            raise ValueError(
+                "minimum_historical_trades "
+                "must be greater than zero."
+            )
+
+        if self.max_symbols <= 0:
+            raise ValueError(
+                "max_symbols must be greater than zero."
+            )
+
+        if self.candle_workers <= 0:
+            raise ValueError(
+                "candle_workers must be greater than zero."
+            )
+
     @staticmethod
     def _extract_usdt_markets(
         markets: dict,
+        limit: int = 100,
     ) -> list[str]:
+        """
+        Select Top-N USDT markets by 24h quote volume.
+
+        Sorting:
+            1. Highest quote volume first.
+            2. Equal volume -> alphabetical symbol order.
+        """
+
+        if limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero."
+            )
+
         stats = markets.get(
             "stats",
             {},
         )
 
-        symbols: set[str] = set()
+        candidates: list[
+            tuple[str, float]
+        ] = []
 
-        for key in stats:
+        for key, item in stats.items():
             value = (
                 str(key)
                 .strip()
@@ -163,14 +245,50 @@ class LiveScanner:
 
             base = value[:-4]
 
-            if base:
-                symbols.add(
-                    f"{base}USDT"
-                )
+            if not base:
+                continue
 
-        return sorted(
-            symbols
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            try:
+                quote_volume = float(
+                    item.get(
+                        "quote_volume",
+                        0.0,
+                    )
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                quote_volume = 0.0
+
+            if quote_volume < 0:
+                quote_volume = 0.0
+
+            candidates.append(
+                (
+                    f"{base}USDT",
+                    quote_volume,
+                )
+            )
+
+        candidates.sort(
+            key=lambda item: (
+                -item[1],
+                item[0],
+            )
         )
+
+        return [
+            symbol
+            for symbol, _volume
+            in candidates[:limit]
+        ]
 
     @staticmethod
     def _base_from_usdt_market(
@@ -242,7 +360,9 @@ class LiveScanner:
             None,
         )
 
-        if not callable(method):
+        if not callable(
+            method
+        ):
             return 0
 
         return int(
@@ -259,7 +379,9 @@ class LiveScanner:
             None,
         )
 
-        if not callable(method):
+        if not callable(
+            method
+        ):
             return None
 
         return method(symbol)
@@ -280,21 +402,15 @@ class LiveScanner:
         descriptor: MarketDescriptor,
         candles,
     ) -> LiveConfluenceResult:
-        """
-        Backward-compatible path for older FakeConfluenceService
-        / test doubles.
-
-        Production LiveConfluenceService has find_candidate(),
-        so production never uses this path.
-        """
-
         evaluate = getattr(
             self.confluence_service,
             "evaluate",
             None,
         )
 
-        if not callable(evaluate):
+        if not callable(
+            evaluate
+        ):
             raise AttributeError(
                 "Configured confluence service must implement "
                 "find_candidate() or evaluate()."
@@ -318,7 +434,7 @@ class LiveScanner:
         candidate: LiveConfluenceResult,
     ) -> tuple[int, bool]:
         """
-        Historical trades are fetched only for a valid candidate.
+        Fetch historical trades only for valid candidates.
         """
 
         if candidate.setup is None:
@@ -335,7 +451,9 @@ class LiveScanner:
             None,
         )
 
-        if not callable(method):
+        if not callable(
+            method
+        ):
             return (
                 self._store_count(
                     descriptor.base_asset
@@ -344,7 +462,9 @@ class LiveScanner:
             )
 
         setup_timestamp_ms = (
-            int(candidate.setup.timestamp)
+            int(
+                candidate.setup.timestamp
+            )
             * 1000
         )
 
@@ -367,7 +487,9 @@ class LiveScanner:
 
         if (
             trades
-            and callable(save_method)
+            and callable(
+                save_method
+            )
         ):
             save_method(
                 trades
@@ -380,37 +502,130 @@ class LiveScanner:
             True,
         )
 
-    def scan_market(
+    def _fetch_candles(
         self,
-        analysis_market: str,
+        symbol: str,
+    ):
+        """
+        Fetch one symbol's bootstrap candles.
+
+        Returns:
+            (symbol, candles, error)
+        """
+
+        try:
+            candles = (
+                self.market_service.history(
+                    symbol,
+                    resolution=self.timeframe,
+                    countback=self.candle_limit,
+                )
+            )
+
+            return (
+                symbol,
+                candles,
+                None,
+            )
+
+        except Exception as exc:
+            return (
+                symbol,
+                [],
+                exc,
+            )
+
+    def _fetch_candles_parallel(
+        self,
+        symbols: list[str],
+    ) -> dict[
+        str,
+        tuple[
+            list,
+            Exception | None,
+        ],
+    ]:
+        """
+        Fetch bootstrap candles concurrently.
+
+        The dictionary preserves every requested symbol.
+        """
+
+        result: dict[
+            str,
+            tuple[
+                list,
+                Exception | None,
+            ],
+        ] = {}
+
+        workers = min(
+            self.candle_workers,
+            max(
+                1,
+                len(symbols),
+            ),
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="gate-candle",
+        ) as executor:
+
+            futures = {
+                executor.submit(
+                    self._fetch_candles,
+                    symbol,
+                ): symbol
+                for symbol in symbols
+            }
+
+            for future in as_completed(
+                futures
+            ):
+                symbol = futures[
+                    future
+                ]
+
+                try:
+                    (
+                        returned_symbol,
+                        candles,
+                        error,
+                    ) = future.result()
+
+                except Exception as exc:
+                    result[
+                        symbol
+                    ] = (
+                        [],
+                        exc,
+                    )
+                    continue
+
+                result[
+                    returned_symbol
+                ] = (
+                    candles,
+                    error,
+                )
+
+        return result
+
+    def _evaluate_with_candles(
+        self,
+        descriptor: MarketDescriptor,
+        candles,
     ) -> LiveConfluenceResult:
-        descriptor = (
-            self._resolve_market(
-                analysis_market
-            )
-        )
-
-        candles = (
-            self.market_service.history(
-                descriptor.analysis_market,
-                resolution=self.timeframe,
-                countback=self.candle_limit,
-            )
-        )
-
-        # --------------------------------------------------
-        # Compatibility path for existing test doubles.
-        # --------------------------------------------------
+        """
+        Run candidate-first pipeline using preloaded candles.
+        """
 
         if not self._has_candidate_pipeline():
             return self._legacy_evaluate(
                 descriptor=descriptor,
                 candles=candles,
             )
-
-        # --------------------------------------------------
-        # Production Candidate-first path.
-        # --------------------------------------------------
 
         candidate = (
             self.confluence_service.find_candidate(
@@ -423,10 +638,6 @@ class LiveScanner:
 
         if candidate.status != "CANDIDATE":
             return candidate
-
-        # --------------------------------------------------
-        # Historical trades ONLY for candidates.
-        # --------------------------------------------------
 
         (
             trade_count,
@@ -457,17 +668,15 @@ class LiveScanner:
                 ),
             )
 
-        # --------------------------------------------------
-        # Final Historical Context + Confluence.
-        # --------------------------------------------------
-
         evaluate = getattr(
             self.confluence_service,
             "evaluate",
             None,
         )
 
-        if not callable(evaluate):
+        if not callable(
+            evaluate
+        ):
             return LiveConfluenceResult(
                 symbol=descriptor.base_asset,
                 setup=candidate.setup,
@@ -491,10 +700,76 @@ class LiveScanner:
             candle_limit=self.candle_limit,
         )
 
+    def scan_market(
+        self,
+        analysis_market: str,
+        candles=None,
+    ) -> LiveConfluenceResult:
+        """
+        Scan one market.
+
+        `candles` can be supplied by the parallel bootstrap stage.
+        """
+
+        descriptor = (
+            self._resolve_market(
+                analysis_market
+            )
+        )
+
+        if candles is None:
+            try:
+                candles = (
+                    self.market_service.history(
+                        descriptor.analysis_market,
+                        resolution=self.timeframe,
+                        countback=self.candle_limit,
+                    )
+                )
+            except Exception as exc:
+                return LiveConfluenceResult(
+                    symbol=descriptor.base_asset,
+                    setup=None,
+                    confluence=None,
+                    status="ERROR",
+                    reason=str(exc),
+                )
+
+        if not self._has_candidate_pipeline():
+            return self._legacy_evaluate(
+                descriptor=descriptor,
+                candles=candles,
+            )
+
+        return self._evaluate_with_candles(
+            descriptor=descriptor,
+            candles=candles,
+        )
+
     def scan(
         self,
         symbols: list[str] | None = None,
     ):
+        """
+        Scan configured market universe.
+
+        Default:
+
+            all Gate.io markets
+                 ↓
+            USDT filter
+                 ↓
+            Top 100 by quote volume
+                 ↓
+            parallel candle bootstrap
+                 ↓
+            candidate-first
+                 ↓
+            historical trades only for candidates
+
+        Explicit symbols bypass Top-N selection.
+        """
+
         if symbols is None:
             markets = (
                 self.market_service.markets()
@@ -502,9 +777,26 @@ class LiveScanner:
 
             symbols = (
                 self._extract_usdt_markets(
-                    markets
+                    markets,
+                    limit=self.max_symbols,
                 )
             )
+
+        else:
+            symbols = [
+                symbol.strip().upper()
+                for symbol in symbols
+            ]
+
+        # --------------------------------------------------
+        # Parallel candle bootstrap.
+        # --------------------------------------------------
+
+        candle_map = (
+            self._fetch_candles_parallel(
+                symbols
+            )
+        )
 
         results = []
 
@@ -513,9 +805,7 @@ class LiveScanner:
 
         for symbol in symbols:
             analysis_market = (
-                symbol
-                .strip()
-                .upper()
+                symbol.strip().upper()
             )
 
             base_symbol = (
@@ -524,35 +814,57 @@ class LiveScanner:
                 )
             )
 
-            try:
-                descriptor = (
-                    self._resolve_market(
-                        analysis_market
-                    )
+            descriptor = (
+                self._resolve_market(
+                    analysis_market
                 )
+            )
 
-                result = (
-                    self.scan_market(
-                        analysis_market
-                    )
+            candles, candle_error = (
+                candle_map.get(
+                    analysis_market,
+                    (
+                        [],
+                        RuntimeError(
+                            "Candle bootstrap result missing."
+                        ),
+                    ),
                 )
+            )
 
-            except Exception as exc:
-                descriptor = (
-                    self._resolve_market(
-                        analysis_market
-                    )
-                )
-
+            if candle_error is not None:
                 result = (
                     LiveConfluenceResult(
                         symbol=base_symbol,
                         setup=None,
                         confluence=None,
                         status="ERROR",
-                        reason=str(exc),
+                        reason=(
+                            "Candle bootstrap failed: "
+                            f"{candle_error}"
+                        ),
                     )
                 )
+
+            else:
+                try:
+                    result = (
+                        self.scan_market(
+                            analysis_market,
+                            candles=candles,
+                        )
+                    )
+
+                except Exception as exc:
+                    result = (
+                        LiveConfluenceResult(
+                            symbol=base_symbol,
+                            setup=None,
+                            confluence=None,
+                            status="ERROR",
+                            reason=str(exc),
+                        )
+                    )
 
             results.append(
                 (
@@ -566,7 +878,10 @@ class LiveScanner:
                 result.status
             ] += 1
 
-            if result.confluence is not None:
+            if (
+                result.confluence
+                is not None
+            ):
                 grade_counter[
                     result.confluence.grade
                 ] += 1
@@ -606,7 +921,9 @@ class LiveScanner:
                 "WARMING_UP"
             ],
             errors=(
-                status_counter["ERROR"]
+                status_counter[
+                    "ERROR"
+                ]
                 + status_counter[
                     "FRESHNESS_CHECK_ERROR"
                 ]
@@ -622,7 +939,10 @@ class LiveScanner:
             ),
         )
 
-        return results, summary
+        return (
+            results,
+            summary,
+        )
 
 
 def print_results(
@@ -630,18 +950,23 @@ def print_results(
     summary: ScanSummary,
 ) -> None:
     print()
-    print("=" * 150)
+    print(
+        "=" * 150
+    )
 
     print(
         "LIVE CONFLUENCE SCANNER "
         "- GATE.IO USDT ANALYSIS"
     )
 
-    print("=" * 150)
+    print(
+        "=" * 150
+    )
 
     print(
-        f"Total USDT markets : "
-        f"{summary.total_symbols}"
+        f"Universe           : "
+        f"Top {summary.total_symbols} USDT markets "
+        f"by 24h quote volume"
     )
 
     print(
@@ -700,8 +1025,13 @@ def print_results(
     )
 
     print()
-    print("GRADE DISTRIBUTION")
-    print("-" * 150)
+    print(
+        "GRADE DISTRIBUTION"
+    )
+
+    print(
+        "-" * 150
+    )
 
     for grade in (
         "A+",
@@ -716,8 +1046,13 @@ def print_results(
         )
 
     print()
-    print("MARKET RESULTS")
-    print("-" * 150)
+    print(
+        "MARKET RESULTS"
+    )
+
+    print(
+        "-" * 150
+    )
 
     print(
         f"{'BASE':<12} "
@@ -730,7 +1065,9 @@ def print_results(
         f"REASON"
     )
 
-    print("-" * 150)
+    print(
+        "-" * 150
+    )
 
     for (
         base,
@@ -743,7 +1080,10 @@ def print_results(
             else "-"
         )
 
-        if result.confluence is not None:
+        if (
+            result.confluence
+            is not None
+        ):
             print(
                 f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
@@ -768,19 +1108,44 @@ def print_results(
             )
 
     print()
-    print("=" * 150)
+    print(
+        "=" * 150
+    )
 
 
 def main() -> None:
+    # Fix Windows PowerShell / cp1256 console encoding.
+    if hasattr(
+        sys.stdout,
+        "reconfigure",
+    ):
+        sys.stdout.reconfigure(
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    if hasattr(
+        sys.stderr,
+        "reconfigure",
+    ):
+        sys.stderr.reconfigure(
+            encoding="utf-8",
+            errors="replace",
+        )
+
     scanner = LiveScanner(
         timeframe="60",
         candle_limit=200,
         historical_trade_lookback_seconds=3600,
         historical_trade_max_pages=3,
         minimum_historical_trades=50,
+        max_symbols=100,
+        candle_workers=10,
     )
 
-    results, summary = scanner.scan()
+    results, summary = (
+        scanner.scan()
+    )
 
     print_results(
         results,
