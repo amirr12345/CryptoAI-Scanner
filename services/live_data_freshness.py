@@ -6,10 +6,6 @@ import time
 
 @dataclass(slots=True, frozen=True)
 class DataFreshnessResult:
-    """
-    Result of live market-data freshness validation.
-    """
-
     latest_candle_timestamp: int
     latest_trade_timestamp: int | None
     candle_lag_seconds: int
@@ -20,14 +16,22 @@ class DataFreshnessResult:
 
 class LiveDataFreshness:
     """
-    Validate candle freshness against the latest live trade.
+    Validate freshness for LIVE market data.
 
-    Candle timestamps are stored in seconds.
+    Modes:
+        LIVE
+            Freshness is enforced.
 
-    Trade timestamps may be stored in seconds or milliseconds.
+        REST_BOOTSTRAP
+            Freshness is not enforced. Historical REST candles
+            are valid for structure/bootstrap analysis even when
+            they are older than the live freshness threshold.
     """
 
     TIMESTAMP_MILLISECOND_THRESHOLD = 100_000_000_000
+
+    LIVE = "LIVE"
+    REST_BOOTSTRAP = "REST_BOOTSTRAP"
 
     def __init__(
         self,
@@ -48,14 +52,35 @@ class LiveDataFreshness:
         self,
         latest_candle_timestamp: int,
         latest_trade_timestamp: int | None = None,
+        mode: str = LIVE,
     ) -> DataFreshnessResult:
         """
-        Check whether the latest candle is fresh.
+        Check candle freshness.
+
+        LIVE:
+            Candle lag is enforced.
+
+        REST_BOOTSTRAP:
+            Candle is accepted regardless of age.
         """
 
         if latest_candle_timestamp <= 0:
             raise ValueError(
                 "latest_candle_timestamp must be greater than zero."
+            )
+
+        normalized_mode = (
+            str(mode)
+            .strip()
+            .upper()
+        )
+
+        if normalized_mode not in {
+            self.LIVE,
+            self.REST_BOOTSTRAP,
+        }:
+            raise ValueError(
+                "mode must be LIVE or REST_BOOTSTRAP."
             )
 
         if latest_trade_timestamp is not None:
@@ -78,6 +103,27 @@ class LiveDataFreshness:
             reference_timestamp
             - int(latest_candle_timestamp),
         )
+
+        if (
+            normalized_mode
+            == self.REST_BOOTSTRAP
+        ):
+            return DataFreshnessResult(
+                latest_candle_timestamp=int(
+                    latest_candle_timestamp
+                ),
+                latest_trade_timestamp=(
+                    int(latest_trade_timestamp)
+                    if latest_trade_timestamp is not None
+                    else None
+                ),
+                candle_lag_seconds=lag_seconds,
+                max_allowed_lag_seconds=(
+                    self.max_candle_lag_seconds
+                ),
+                fresh=True,
+                status="REST_BOOTSTRAP",
+            )
 
         fresh = (
             lag_seconds
@@ -110,13 +156,6 @@ class LiveDataFreshness:
         cls,
         timestamp: int,
     ) -> int:
-        """
-        Normalize trade timestamp to seconds.
-
-        Real project timestamps are typically around
-        1.7e12 when expressed in milliseconds.
-        """
-
         timestamp = int(timestamp)
 
         if (

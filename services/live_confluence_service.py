@@ -75,11 +75,7 @@ class LiveConfluenceService:
 
         find_candidate()
 
-    runs only through Structure Setup and DOES NOT
-    require Historical Trades.
-
-    This allows LiveScanner to avoid expensive historical
-    trade downloads for markets that have no valid setup.
+    The candidate pass stops before Historical Context.
     """
 
     def __init__(
@@ -168,7 +164,7 @@ class LiveConfluenceService:
         Return the best available candle set.
 
         Live CandleStore is preferred.
-        Bootstrap candles are used as fallback.
+        Bootstrap candles are merged with live candles.
         """
 
         normalized_symbol = (
@@ -227,21 +223,20 @@ class LiveConfluenceService:
         latest_trade_timestamp: int | None = None,
         timeframe: str = "60",
         candle_limit: int = 200,
+        data_mode: str = LiveDataFreshness.LIVE,
     ) -> tuple[
         list[Candle],
-        Candle,
+        Candle | None,
         LiveConfluenceResult | None,
     ]:
         """
-        Prepare live candles and validate freshness.
+        Prepare candles and apply freshness policy.
 
-        Returns:
+        LIVE:
+            freshness is enforced.
 
-            analysis_candles
-            latest_candle
-            early_result
-
-        early_result is not None when the pipeline must stop.
+        REST_BOOTSTRAP:
+            historical candle age does not invalidate the data.
         """
 
         normalized_symbol = (
@@ -277,13 +272,26 @@ class LiveConfluenceService:
                 ),
             )
 
-        latest_candle = (
-            live_candle
-            if live_candle is not None
-            else analysis_candles[-1]
-        )
+        if (
+            data_mode
+            == LiveDataFreshness.LIVE
+            and live_candle is not None
+        ):
+            latest_candle = live_candle
+        else:
+            latest_candle = (
+                live_candle
+                if live_candle is not None
+                and data_mode
+                == LiveDataFreshness.LIVE
+                else analysis_candles[-1]
+            )
 
-        if latest_trade_timestamp is None:
+        if (
+            latest_trade_timestamp is None
+            and data_mode
+            == LiveDataFreshness.LIVE
+        ):
             try:
                 latest_trade_timestamp = (
                     self.historical_context
@@ -303,6 +311,7 @@ class LiveConfluenceService:
                 latest_trade_timestamp=(
                     latest_trade_timestamp
                 ),
+                mode=data_mode,
             )
         except Exception as exc:
             return (
@@ -335,9 +344,10 @@ class LiveConfluenceService:
                 ),
             )
 
-        if len(
-            analysis_candles
-        ) < self.min_candles_for_structure:
+        if (
+            len(analysis_candles)
+            < self.min_candles_for_structure
+        ):
             return (
                 analysis_candles,
                 latest_candle,
@@ -370,17 +380,12 @@ class LiveConfluenceService:
         swing_window: int = 2,
         displacement_pct: float = 0.15,
         max_bars_after_sweep: int = 10,
+        data_mode: str = LiveDataFreshness.LIVE,
     ) -> LiveConfluenceResult:
         """
-        Candidate-first pipeline.
+        Run only through Structure Setup.
 
-        Stops immediately after Structure Setup.
-
-        IMPORTANT:
-            No HistoricalContextEngine call is made here.
-
-        This is intentionally cheap compared with the full
-        confluence evaluation.
+        Historical Context is intentionally not calculated.
         """
 
         normalized_symbol = (
@@ -397,6 +402,7 @@ class LiveConfluenceService:
             latest_trade_timestamp=None,
             timeframe=timeframe,
             candle_limit=candle_limit,
+            data_mode=data_mode,
         )
 
         if early_result is not None:
@@ -509,12 +515,10 @@ class LiveConfluenceService:
         displacement_pct: float = 0.15,
         max_bars_after_sweep: int = 10,
         lookback_seconds: int = 3600,
+        data_mode: str = LiveDataFreshness.LIVE,
     ) -> LiveConfluenceResult:
         """
-        Run complete live analysis.
-
-        Candidate-first logic is centralized here as well,
-        so the pipeline has one canonical implementation.
+        Run the complete live/historical confluence pipeline.
         """
 
         candidate = self.find_candidate(
@@ -525,6 +529,7 @@ class LiveConfluenceService:
             swing_window=swing_window,
             displacement_pct=displacement_pct,
             max_bars_after_sweep=max_bars_after_sweep,
+            data_mode=data_mode,
         )
 
         if candidate.status != "CANDIDATE":
@@ -532,15 +537,6 @@ class LiveConfluenceService:
 
         normalized_symbol = (
             symbol.strip().upper()
-        )
-
-        analysis_candles = (
-            self.get_live_candles(
-                symbol=normalized_symbol,
-                fallback_candles=candles,
-                timeframe=timeframe,
-                limit=candle_limit,
-            )
         )
 
         latest_setup = candidate.setup
