@@ -5,49 +5,42 @@ from types import SimpleNamespace
 from microstructure.confluence_engine import (
     ConfluenceEngine,
 )
-from models.confluence_result import ConfluenceResult
-from models.historical_context import HistoricalContext
-from models.structure_setup import StructureSetup
+from models.confluence_result import (
+    ConfluenceResult,
+)
+from models.historical_context import (
+    HistoricalContext,
+)
+from models.structure_setup import (
+    StructureSetup,
+)
 
 
 class HistoricalConfluenceEngine:
     """
     Integrate Structure Setup with Historical Context.
 
-    Historical pipeline:
+    Historical data:
 
-        StructureSetup.timestamp
-                ↓
-        HistoricalContext.timestamp
-                ↓
-        CVD / Delta
+        CVD
+        Delta
         VWAP
         Volume Profile
         Order Flow
         Session Quality
-                ↓
-        ConfluenceEngine
 
-    Order Book is intentionally NOT used here because the project
-    does not have timestamped historical Level-2 data.
+    Optional live enrichment:
 
-    Therefore:
+        Current Order Book
 
-        Historical score:
-            Structure
-            Liquidity
-            CVD
-            Volume Profile
-            VWAP
-            Order Flow
+    IMPORTANT:
 
-        Live score:
-            all above
-            +
-            Order Book
+        The historical context remains strictly as-of the setup
+        timestamp.
 
-    Timestamp equality is mandatory to prevent accidental
-    use of a different historical context.
+        Current Order Book is accepted only as an optional live
+        confirmation and must never be stored inside the historical
+        context itself.
     """
 
     def __init__(
@@ -64,16 +57,24 @@ class HistoricalConfluenceEngine:
         self,
         setup: StructureSetup,
         context: HistoricalContext,
+        order_book=None,
     ) -> ConfluenceResult:
         """
-        Evaluate one StructureSetup using its historical context.
+        Evaluate one StructureSetup.
+
+        `order_book` is optional and is intended only for live
+        confirmation.
+
+        Historical callers should leave it as None.
         """
 
         # --------------------------------------------------------
-        # Timestamp safety
+        # Timestamp protection
         # --------------------------------------------------------
 
-        if int(setup.timestamp) != int(
+        if int(
+            setup.timestamp
+        ) != int(
             context.timestamp
         ):
             raise ValueError(
@@ -144,13 +145,15 @@ class HistoricalConfluenceEngine:
         # VWAP
         # --------------------------------------------------------
 
+        vwap_direction = (
+            self._vwap_direction(
+                context
+            )
+        )
+
         vwap = SimpleNamespace(
-            direction=self._vwap_direction(
-                context
-            ),
-            vwap_direction=self._vwap_direction(
-                context
-            ),
+            direction=vwap_direction,
+            vwap_direction=vwap_direction,
             vwap_position=(
                 context.vwap_position
             ),
@@ -160,16 +163,14 @@ class HistoricalConfluenceEngine:
             vwap_slope=(
                 context.vwap_slope
             ),
-            vwap=(
-                context.vwap
-            ),
+            vwap=context.vwap,
             previous_vwap=(
                 context.previous_vwap
             ),
         )
 
         # --------------------------------------------------------
-        # Historical Order Flow
+        # Order Flow
         # --------------------------------------------------------
 
         order_flow = SimpleNamespace(
@@ -190,6 +191,9 @@ class HistoricalConfluenceEngine:
             ),
             sell_ratio=(
                 context.sell_ratio
+            ),
+            trade_count=(
+                context.trade_count
             ),
             average_trade_size=(
                 context.average_trade_size
@@ -218,7 +222,7 @@ class HistoricalConfluenceEngine:
         )
 
         # --------------------------------------------------------
-        # Historical Session
+        # Session
         # --------------------------------------------------------
 
         session = SimpleNamespace(
@@ -243,27 +247,25 @@ class HistoricalConfluenceEngine:
         )
 
         # --------------------------------------------------------
-        # IMPORTANT:
+        # Order Book
         #
-        # No Order Book here.
+        # Historical call:
+        #     None
         #
-        # Current Order Book data cannot be used to evaluate
-        # a historical timestamp unless timestamped historical
-        # Level-2 data is available.
+        # Live call:
+        #     current live order-book context
         # --------------------------------------------------------
 
-        result = self.confluence.evaluate(
+        return self.confluence.evaluate(
             setup=setup,
             cvd=cvd,
             profile=profile,
             vwap=vwap,
             order_flow=order_flow,
-            order_book=None,
+            order_book=order_book,
             session=session,
             historical_context=context,
         )
-
-        return result
 
     @staticmethod
     def _vwap_direction(
@@ -272,12 +274,9 @@ class HistoricalConfluenceEngine:
         """
         Derive VWAP directional bias from historical VWAP slope.
 
-        Positive slope  -> BULLISH
-        Negative slope  -> BEARISH
-        Flat/unknown     -> NEUTRAL
-
-        Price position is passed separately and may be used as
-        secondary confirmation by ConfluenceEngine.
+        Positive slope -> BULLISH
+        Negative slope -> BEARISH
+        Flat -> NEUTRAL
         """
 
         slope = float(

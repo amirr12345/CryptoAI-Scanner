@@ -8,16 +8,13 @@ from microstructure.historical_confluence import (
 from models.historical_context import (
     HistoricalContext,
 )
-from models.structure_setup import (
-    StructureSetup,
-)
+from models.structure_setup import StructureSetup
 
 
 def make_setup(
     direction: str = "BULLISH",
     timestamp: int = 1000,
 ) -> StructureSetup:
-
     return StructureSetup(
         index=20,
         timestamp=timestamp,
@@ -44,13 +41,36 @@ def make_context(
     cvd_strength: float = 80.0,
     profile_position: str = "BELOW_VALUE_AREA",
     vwap_slope: float = 2.0,
+    buy_volume: float = 700.0,
+    sell_volume: float = 300.0,
+    delta: float = 400.0,
+    delta_pct: float = 40.0,
+    buy_ratio: float = 0.70,
+    sell_ratio: float = 0.30,
+    average_trade_size: float = 10.0,
+    large_trade_buy_volume: float = 180.0,
+    large_trade_sell_volume: float = 40.0,
+    large_trade_imbalance: float = 0.6363,
+    order_flow_aggression: str = "BULLISH",
+    order_flow_strength: float = 80.0,
+    session_name: str = "LONDON_NY_OVERLAP",
+    session_quality: float = 10.0,
+    session_is_overlap: bool = True,
 ) -> HistoricalContext:
-
     return HistoricalContext(
         symbol="BTC",
         timestamp=timestamp,
+
+        # --------------------------------------------------
+        # Historical trade context
+        # --------------------------------------------------
+
         trade_count=100,
         lookback_seconds=3600,
+
+        # --------------------------------------------------
+        # CVD
+        # --------------------------------------------------
 
         cvd_direction=cvd_direction,
         cvd_strength=cvd_strength,
@@ -58,16 +78,55 @@ def make_context(
         cvd_delta=50.0,
         cvd_change=60.0,
 
+        # --------------------------------------------------
+        # VWAP
+        # --------------------------------------------------
+
         vwap=101.0,
         previous_vwap=99.0,
         vwap_position="ABOVE_VWAP",
         vwap_distance_pct=1.0,
         vwap_slope=vwap_slope,
 
+        # --------------------------------------------------
+        # Volume Profile
+        # --------------------------------------------------
+
         poc=100.0,
         vah=102.0,
         val=98.0,
         profile_position=profile_position,
+
+        # --------------------------------------------------
+        # Order Flow
+        # --------------------------------------------------
+
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
+        delta=delta,
+        delta_pct=delta_pct,
+        buy_ratio=buy_ratio,
+        sell_ratio=sell_ratio,
+        average_trade_size=average_trade_size,
+
+        large_trade_buy_volume=large_trade_buy_volume,
+        large_trade_sell_volume=large_trade_sell_volume,
+        large_trade_imbalance=large_trade_imbalance,
+
+        order_flow_aggression=order_flow_aggression,
+        order_flow_strength=order_flow_strength,
+
+        # --------------------------------------------------
+        # Session
+        # --------------------------------------------------
+
+        session_name=session_name,
+        session_quality=session_quality,
+        session_is_overlap=session_is_overlap,
+
+        # --------------------------------------------------
+        # Historical marker
+        # --------------------------------------------------
 
         historical=True,
     )
@@ -87,6 +146,17 @@ def test_bullish_aligned_context_produces_a_plus():
             cvd_strength=80.0,
             profile_position="BELOW_VALUE_AREA",
             vwap_slope=2.0,
+            buy_volume=700.0,
+            sell_volume=300.0,
+            delta=400.0,
+            delta_pct=40.0,
+            buy_ratio=0.70,
+            sell_ratio=0.30,
+            order_flow_aggression="BULLISH",
+            order_flow_strength=80.0,
+            session_name="LONDON_NY_OVERLAP",
+            session_quality=10.0,
+            session_is_overlap=True,
         ),
     )
 
@@ -100,6 +170,14 @@ def test_bullish_aligned_context_produces_a_plus():
     assert result.grade == "A+"
     assert result.actionable is True
     assert not result.conflicts
+
+    assert result.structure_points == 25.0
+    assert result.liquidity_points == 15.0
+    assert result.cvd_points == 15.0
+    assert result.profile_points == 15.0
+    assert result.vwap_points == 10.0
+    assert result.order_flow_points == 10.0
+    assert result.order_book_points == 0.0
 
 
 def test_bearish_aligned_context_produces_a_plus():
@@ -116,6 +194,17 @@ def test_bearish_aligned_context_produces_a_plus():
             cvd_strength=80.0,
             profile_position="ABOVE_VALUE_AREA",
             vwap_slope=-2.0,
+            buy_volume=300.0,
+            sell_volume=700.0,
+            delta=-400.0,
+            delta_pct=-40.0,
+            buy_ratio=0.30,
+            sell_ratio=0.70,
+            order_flow_aggression="BEARISH",
+            order_flow_strength=80.0,
+            session_name="LONDON_NY_OVERLAP",
+            session_quality=10.0,
+            session_is_overlap=True,
         ),
     )
 
@@ -128,6 +217,14 @@ def test_bearish_aligned_context_produces_a_plus():
 
     assert result.grade == "A+"
     assert result.actionable is True
+
+    assert result.structure_points == 25.0
+    assert result.liquidity_points == 15.0
+    assert result.cvd_points == 15.0
+    assert result.profile_points == 15.0
+    assert result.vwap_points == 10.0
+    assert result.order_flow_points == 10.0
+    assert result.order_book_points == 0.0
 
 
 def test_opposing_cvd_creates_conflict():
@@ -144,6 +241,14 @@ def test_opposing_cvd_creates_conflict():
             cvd_strength=90.0,
             profile_position="BELOW_VALUE_AREA",
             vwap_slope=2.0,
+            buy_volume=300.0,
+            sell_volume=700.0,
+            delta=-400.0,
+            delta_pct=-40.0,
+            buy_ratio=0.30,
+            sell_ratio=0.70,
+            order_flow_aggression="BEARISH",
+            order_flow_strength=80.0,
         ),
     )
 
@@ -172,6 +277,14 @@ def test_opposing_profile_creates_conflict():
             cvd_strength=80.0,
             profile_position="ABOVE_VALUE_AREA",
             vwap_slope=2.0,
+            buy_volume=700.0,
+            sell_volume=300.0,
+            delta=400.0,
+            delta_pct=40.0,
+            buy_ratio=0.70,
+            sell_ratio=0.30,
+            order_flow_aggression="BULLISH",
+            order_flow_strength=80.0,
         ),
     )
 
@@ -200,6 +313,14 @@ def test_opposing_vwap_creates_conflict():
             cvd_strength=80.0,
             profile_position="BELOW_VALUE_AREA",
             vwap_slope=-2.0,
+            buy_volume=700.0,
+            sell_volume=300.0,
+            delta=400.0,
+            delta_pct=40.0,
+            buy_ratio=0.70,
+            sell_ratio=0.30,
+            order_flow_aggression="BULLISH",
+            order_flow_strength=80.0,
         ),
     )
 
@@ -267,6 +388,14 @@ def test_flat_vwap_is_neutral():
         cvd_strength=80.0,
         profile_position="BELOW_VALUE_AREA",
         vwap_slope=0.0,
+        buy_volume=700.0,
+        sell_volume=300.0,
+        delta=400.0,
+        delta_pct=40.0,
+        buy_ratio=0.70,
+        sell_ratio=0.30,
+        order_flow_aggression="BULLISH",
+        order_flow_strength=80.0,
     )
 
     result = engine.evaluate(
@@ -279,10 +408,20 @@ def test_flat_vwap_is_neutral():
 
     assert result.vwap_points == 7.0
 
-    # Current new scoring model normalizes the available
-    # Historical features to 100.
+    # Structure      25
+    # Liquidity      15
+    # CVD            15
+    # Profile        15
+    # VWAP             7
+    # Order Flow      10
+    # --------------------------------
+    # Raw              87
+    #
+    # Available        90
+    #
+    # Normalized       96.666...
     assert result.score == pytest.approx(
-        96.25,
+        96.67,
         abs=0.01,
     )
 
@@ -299,6 +438,14 @@ def test_partial_cvd_alignment_gets_partial_score():
         cvd_strength=40.0,
         profile_position="BELOW_VALUE_AREA",
         vwap_slope=2.0,
+        buy_volume=700.0,
+        sell_volume=300.0,
+        delta=400.0,
+        delta_pct=40.0,
+        buy_ratio=0.70,
+        sell_ratio=0.30,
+        order_flow_aggression="BULLISH",
+        order_flow_strength=80.0,
     )
 
     result = engine.evaluate(
@@ -311,8 +458,20 @@ def test_partial_cvd_alignment_gets_partial_score():
 
     assert result.cvd_points == 8.0
 
+    # Structure      25
+    # Liquidity      15
+    # CVD              8
+    # Profile        15
+    # VWAP            10
+    # Order Flow      10
+    # --------------------------------
+    # Raw              83
+    #
+    # Available        90
+    #
+    # Normalized       92.222...
     assert result.score == pytest.approx(
-        91.25,
+        92.22,
         abs=0.01,
     )
 
