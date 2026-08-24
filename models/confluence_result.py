@@ -8,8 +8,18 @@ class ConfluenceResult:
     """
     Confluence evaluation for a structure setup.
 
-    Score is intentionally separate from the old technical
-    score used by SignalEngine.
+    Primary market score = 100:
+
+        Structure / MSS        25
+        Liquidity Sweep        15
+        Volume Profile         15
+        VWAP                   10
+        CVD / Delta             15
+        Order Flow             10
+        Order Book             10
+
+    Session quality is kept separate from the 100-point
+    primary market score.
     """
 
     direction: str
@@ -28,3 +38,18 @@ class ConfluenceResult:
     reasons: tuple[str, ...]
 
     actionable: bool
+
+    # ------------------------------------------------------------
+    # New scoring components
+    # ------------------------------------------------------------
+
+    liquidity_points: float = 0.0
+    order_flow_points: float = 0.0
+    order_book_points: float = 0.0
+
+    # ------------------------------------------------------------
+    # Session quality is NOT part of the 100-point score.
+    # ------------------------------------------------------------
+
+    session_quality: float = 0.0
+    session_name: str = "UNKNOWN"

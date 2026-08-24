@@ -5,28 +5,42 @@ from types import SimpleNamespace
 from microstructure.confluence_engine import (
     ConfluenceEngine,
 )
-from models.confluence_result import ConfluenceResult
-from models.historical_context import HistoricalContext
-from models.structure_setup import StructureSetup
+from models.confluence_result import (
+    ConfluenceResult,
+)
+from models.historical_context import (
+    HistoricalContext,
+)
+from models.structure_setup import (
+    StructureSetup,
+)
 
 
 class HistoricalConfluenceEngine:
     """
     Integrate Structure Setup with Historical Context.
 
-    Flow:
+    Historical data:
 
-        StructureSetup.timestamp
-                ↓
-        HistoricalContext.timestamp
-                ↓
-        CVD + VWAP + Volume Profile
-                ↓
-        ConfluenceEngine
+        CVD
+        Delta
+        VWAP
+        Volume Profile
+        Order Flow
+        Session Quality
 
-    The integration refuses to evaluate when the timestamps
-    do not match, preventing accidental use of a different
-    historical context.
+    Optional live enrichment:
+
+        Current Order Book
+
+    IMPORTANT:
+
+        The historical context remains strictly as-of the setup
+        timestamp.
+
+        Current Order Book is accepted only as an optional live
+        confirmation and must never be stored inside the historical
+        context itself.
     """
 
     def __init__(
@@ -43,12 +57,24 @@ class HistoricalConfluenceEngine:
         self,
         setup: StructureSetup,
         context: HistoricalContext,
+        order_book=None,
     ) -> ConfluenceResult:
         """
-        Evaluate one StructureSetup using its historical context.
+        Evaluate one StructureSetup.
+
+        `order_book` is optional and is intended only for live
+        confirmation.
+
+        Historical callers should leave it as None.
         """
 
-        if int(setup.timestamp) != int(
+        # --------------------------------------------------------
+        # Timestamp protection
+        # --------------------------------------------------------
+
+        if int(
+            setup.timestamp
+        ) != int(
             context.timestamp
         ):
             raise ValueError(
@@ -56,31 +82,189 @@ class HistoricalConfluenceEngine:
                 "historical context timestamp must match."
             )
 
+        # --------------------------------------------------------
+        # Historical marker
+        # --------------------------------------------------------
+
         if not context.historical:
             raise ValueError(
                 "Historical context is not marked historical."
             )
 
+        # --------------------------------------------------------
+        # CVD / Delta
+        # --------------------------------------------------------
+
         cvd = SimpleNamespace(
-            direction=context.cvd_direction,
-            strength=context.cvd_strength,
+            direction=(
+                context.cvd_direction
+            ),
+            strength=(
+                context.cvd_strength
+            ),
+            cvd_direction=(
+                context.cvd_direction
+            ),
+            cvd_strength=(
+                context.cvd_strength
+            ),
+            cvd_divergence=(
+                context.cvd_divergence
+            ),
+            cvd_delta=(
+                context.cvd_delta
+            ),
+            cvd_change=(
+                context.cvd_change
+            ),
+            delta=(
+                context.delta
+            ),
+            delta_pct=(
+                context.delta_pct
+            ),
         )
+
+        # --------------------------------------------------------
+        # Volume Profile
+        # --------------------------------------------------------
 
         profile = SimpleNamespace(
-            position=context.profile_position,
+            position=(
+                context.profile_position
+            ),
+            profile_position=(
+                context.profile_position
+            ),
+            poc=context.poc,
+            vah=context.vah,
+            val=context.val,
         )
 
-        vwap = SimpleNamespace(
-            direction=self._vwap_direction(
+        # --------------------------------------------------------
+        # VWAP
+        # --------------------------------------------------------
+
+        vwap_direction = (
+            self._vwap_direction(
                 context
             )
         )
+
+        vwap = SimpleNamespace(
+            direction=vwap_direction,
+            vwap_direction=vwap_direction,
+            vwap_position=(
+                context.vwap_position
+            ),
+            vwap_distance_pct=(
+                context.vwap_distance_pct
+            ),
+            vwap_slope=(
+                context.vwap_slope
+            ),
+            vwap=context.vwap,
+            previous_vwap=(
+                context.previous_vwap
+            ),
+        )
+
+        # --------------------------------------------------------
+        # Order Flow
+        # --------------------------------------------------------
+
+        order_flow = SimpleNamespace(
+            buy_volume=(
+                context.buy_volume
+            ),
+            sell_volume=(
+                context.sell_volume
+            ),
+            delta=(
+                context.delta
+            ),
+            delta_pct=(
+                context.delta_pct
+            ),
+            buy_ratio=(
+                context.buy_ratio
+            ),
+            sell_ratio=(
+                context.sell_ratio
+            ),
+            trade_count=(
+                context.trade_count
+            ),
+            average_trade_size=(
+                context.average_trade_size
+            ),
+            large_trade_buy_volume=(
+                context.large_trade_buy_volume
+            ),
+            large_trade_sell_volume=(
+                context.large_trade_sell_volume
+            ),
+            large_trade_imbalance=(
+                context.large_trade_imbalance
+            ),
+            order_flow_aggression=(
+                context.order_flow_aggression
+            ),
+            order_flow_strength=(
+                context.order_flow_strength
+            ),
+            aggression=(
+                context.order_flow_aggression
+            ),
+            aggression_strength=(
+                context.order_flow_strength
+            ),
+        )
+
+        # --------------------------------------------------------
+        # Session
+        # --------------------------------------------------------
+
+        session = SimpleNamespace(
+            session_name=(
+                context.session_name
+            ),
+            session_quality=(
+                context.session_quality
+            ),
+            session_is_overlap=(
+                context.session_is_overlap
+            ),
+            name=(
+                context.session_name
+            ),
+            quality_score=(
+                context.session_quality
+            ),
+            is_overlap=(
+                context.session_is_overlap
+            ),
+        )
+
+        # --------------------------------------------------------
+        # Order Book
+        #
+        # Historical call:
+        #     None
+        #
+        # Live call:
+        #     current live order-book context
+        # --------------------------------------------------------
 
         return self.confluence.evaluate(
             setup=setup,
             cvd=cvd,
             profile=profile,
             vwap=vwap,
+            order_flow=order_flow,
+            order_book=order_book,
+            session=session,
+            historical_context=context,
         )
 
     @staticmethod
@@ -90,13 +274,9 @@ class HistoricalConfluenceEngine:
         """
         Derive VWAP directional bias from historical VWAP slope.
 
-        Positive slope  -> BULLISH
-        Negative slope  -> BEARISH
-        Flat/unknown     -> NEUTRAL
-
-        Price position relative to VWAP is intentionally not
-        treated as trend direction. The existing ConfluenceEngine
-        expects a directional context here.
+        Positive slope -> BULLISH
+        Negative slope -> BEARISH
+        Flat -> NEUTRAL
         """
 
         slope = float(
