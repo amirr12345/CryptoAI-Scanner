@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from core.trade_store import TradeStore
+
 from microstructure.bucketed_cvd_divergence import (
     BucketedCVDAnalyzer,
 )
@@ -10,12 +11,16 @@ from microstructure.cvd_engine import CVDEngine
 from microstructure.cvd_strength import (
     CVDStrengthAnalyzer,
 )
+from microstructure.session_engine import (
+    SessionEngine,
+)
 from microstructure.time_bucketed_cvd import (
     TimeBucketedCVDEngine,
 )
 from microstructure.volume_profile import (
     VolumeProfileEngine,
 )
+
 from models.historical_context import (
     HistoricalContext,
 )
@@ -49,7 +54,7 @@ class HistoricalContextEngine:
         in HistoricalContext because that would introduce
         look-ahead bias.
 
-        Order Book Imbalance belongs to the live confirmation
+        Order Book belongs to the live execution/confirmation
         layer.
     """
 
@@ -91,10 +96,7 @@ class HistoricalContextEngine:
             value_area_pct
         )
 
-        if (
-            self.bucket_interval_seconds
-            <= 0
-        ):
+        if self.bucket_interval_seconds <= 0:
             raise ValueError(
                 "bucket_interval_seconds "
                 "must be greater than zero."
@@ -102,12 +104,14 @@ class HistoricalContextEngine:
 
         if self.cvd_lookback <= 0:
             raise ValueError(
-                "cvd_lookback must be greater than zero."
+                "cvd_lookback "
+                "must be greater than zero."
             )
 
         if self.cvd_swing_window <= 0:
             raise ValueError(
-                "cvd_swing_window must be greater than zero."
+                "cvd_swing_window "
+                "must be greater than zero."
             )
 
         if self.volume_profile_bins <= 0:
@@ -126,10 +130,7 @@ class HistoricalContextEngine:
                 "0 and 100."
             )
 
-        if (
-            large_trade_multiplier
-            <= 0
-        ):
+        if large_trade_multiplier <= 0:
             raise ValueError(
                 "large_trade_multiplier "
                 "must be greater than zero."
@@ -157,6 +158,14 @@ class HistoricalContextEngine:
             VolumeProfileEngine()
         )
 
+        # Session Engine is deterministic for the timestamp
+        # and dynamically evaluates market activity.
+        self.session_engine = SessionEngine()
+
+    # ============================================================
+    # MAIN HISTORICAL CONTEXT
+    # ============================================================
+
     def calculate(
         self,
         symbol: str,
@@ -166,14 +175,14 @@ class HistoricalContextEngine:
         """
         Reconstruct context at `timestamp`.
 
-        `timestamp` is expected to use the same unit as
-        candle/structure timestamps.
+        `timestamp` uses the same unit as structure/candle
+        timestamps.
 
         Only trades inside:
 
             [timestamp - lookback_seconds, timestamp]
 
-        participate in the calculations.
+        participate.
 
         No future trades are permitted.
         """
@@ -193,6 +202,10 @@ class HistoricalContextEngine:
             .strip()
             .upper()
         )
+
+        # --------------------------------------------------------
+        # Timestamp scale
+        # --------------------------------------------------------
 
         timestamp_scale = (
             self._detect_timestamp_scale(
@@ -215,6 +228,10 @@ class HistoricalContextEngine:
             - lookback_units
         )
 
+        # --------------------------------------------------------
+        # Historical trades
+        # --------------------------------------------------------
+
         trades = (
             self.trade_store.get_trades(
                 symbol=normalized_symbol,
@@ -230,9 +247,9 @@ class HistoricalContextEngine:
                 f"timestamp={timestamp}."
             )
 
-        # --------------------------------------------------
+        # --------------------------------------------------------
         # HARD AS-OF VALIDATION
-        # --------------------------------------------------
+        # --------------------------------------------------------
 
         future_trades = [
             trade
@@ -246,9 +263,20 @@ class HistoricalContextEngine:
                 "Historical context contains future trades."
             )
 
-        # --------------------------------------------------
+        # --------------------------------------------------------
+        # Ensure chronological order
+        # --------------------------------------------------------
+
+        trades = sorted(
+            trades,
+            key=lambda trade: int(
+                trade.timestamp
+            ),
+        )
+
+        # ========================================================
         # CVD
-        # --------------------------------------------------
+        # ========================================================
 
         cvd = self.cvd_engine.calculate(
             trades=trades,
@@ -256,9 +284,9 @@ class HistoricalContextEngine:
             swing_window=self.cvd_swing_window,
         )
 
-        # --------------------------------------------------
-        # Time-bucketed CVD
-        # --------------------------------------------------
+        # ========================================================
+        # TIME-BUCKETED CVD
+        # ========================================================
 
         buckets = (
             self.bucketed_cvd.calculate(
@@ -284,9 +312,9 @@ class HistoricalContextEngine:
             )
         )
 
-        # --------------------------------------------------
-        # Historical VWAP
-        # --------------------------------------------------
+        # ========================================================
+        # HISTORICAL VWAP
+        # ========================================================
 
         vwap = self._calculate_vwap(
             trades=trades
@@ -332,9 +360,9 @@ class HistoricalContextEngine:
                 - previous_vwap
             )
 
-        # --------------------------------------------------
-        # Volume Profile
-        # --------------------------------------------------
+        # ========================================================
+        # VOLUME PROFILE
+        # ========================================================
 
         profile = (
             self.volume_profile.calculate(
@@ -345,9 +373,9 @@ class HistoricalContextEngine:
             )
         )
 
-        # --------------------------------------------------
-        # Order Flow
-        # --------------------------------------------------
+        # ========================================================
+        # ORDER FLOW
+        # ========================================================
 
         (
             buy_volume,
@@ -366,43 +394,52 @@ class HistoricalContextEngine:
             trades=trades
         )
 
-        # --------------------------------------------------
-        # Session Quality
-        # --------------------------------------------------
+        # ========================================================
+        # SESSION ENGINE
+        # ========================================================
 
-        session_name = (
-            self._session_name(
-                timestamp=timestamp
-            )
-        )
-
-        session_is_overlap = (
-            session_name
-            == "LONDON_NY_OVERLAP"
-        )
-
-        session_quality = (
-            self._session_quality(
-                session_name=session_name,
-                trade_count=len(trades),
+        session = (
+            self.session_engine.analyze(
+                timestamp=int(
+                    timestamp
+                ),
+                trade_count=len(
+                    trades
+                ),
                 order_flow_strength=(
                     order_flow_strength
                 ),
+                cvd_strength=(
+                    cvd_strength.overall_strength
+                ),
+                liquidity_ratio=(
+                    self._liquidity_activity_ratio(
+                        buy_volume=buy_volume,
+                        sell_volume=sell_volume,
+                    )
+                ),
             )
         )
+
+        # ========================================================
+        # FINAL HISTORICAL CONTEXT
+        # ========================================================
 
         return HistoricalContext(
             symbol=normalized_symbol,
             timestamp=int(timestamp),
 
-            trade_count=len(trades),
+            trade_count=len(
+                trades
+            ),
+
             lookback_seconds=int(
                 lookback_seconds
             ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # CVD
-            # ------------------------------
+            # ----------------------------------------------------
 
             cvd_direction=(
                 cvd_strength.direction
@@ -424,12 +461,15 @@ class HistoricalContextEngine:
                 cvd.cvd_change
             ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # VWAP
-            # ------------------------------
+            # ----------------------------------------------------
 
             vwap=vwap,
-            previous_vwap=previous_vwap,
+
+            previous_vwap=(
+                previous_vwap
+            ),
 
             vwap_position=(
                 vwap_position
@@ -439,11 +479,13 @@ class HistoricalContextEngine:
                 vwap_distance_pct
             ),
 
-            vwap_slope=vwap_slope,
+            vwap_slope=(
+                vwap_slope
+            ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # Volume Profile
-            # ------------------------------
+            # ----------------------------------------------------
 
             poc=profile.poc,
             vah=profile.vah,
@@ -453,18 +495,33 @@ class HistoricalContextEngine:
                 profile.position
             ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # Order Flow
-            # ------------------------------
+            # ----------------------------------------------------
 
-            buy_volume=buy_volume,
-            sell_volume=sell_volume,
+            buy_volume=(
+                buy_volume
+            ),
 
-            delta=delta,
-            delta_pct=delta_pct,
+            sell_volume=(
+                sell_volume
+            ),
 
-            buy_ratio=buy_ratio,
-            sell_ratio=sell_ratio,
+            delta=(
+                delta
+            ),
+
+            delta_pct=(
+                delta_pct
+            ),
+
+            buy_ratio=(
+                buy_ratio
+            ),
+
+            sell_ratio=(
+                sell_ratio
+            ),
 
             average_trade_size=(
                 average_trade_size
@@ -490,30 +547,32 @@ class HistoricalContextEngine:
                 order_flow_strength
             ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # Session
-            # ------------------------------
+            # ----------------------------------------------------
 
-            session_name=session_name,
+            session_name=(
+                session.name
+            ),
 
             session_quality=(
-                session_quality
+                session.quality
             ),
 
             session_is_overlap=(
-                session_is_overlap
+                session.is_overlap
             ),
 
-            # ------------------------------
+            # ----------------------------------------------------
             # Historical marker
-            # ------------------------------
+            # ----------------------------------------------------
 
             historical=True,
         )
 
-    # ======================================================
+    # ============================================================
     # ORDER FLOW
-    # ======================================================
+    # ============================================================
 
     def _calculate_order_flow(
         self,
@@ -535,10 +594,22 @@ class HistoricalContextEngine:
         """
         Calculate executed-trade order flow.
 
-        Buy/sell volume is taken directly from the Trade.side
-        field supplied by the provider.
+        Buy/sell volume comes directly from Trade.side.
 
-        No future data is used.
+        Returns:
+
+            buy_volume
+            sell_volume
+            delta
+            delta_pct
+            buy_ratio
+            sell_ratio
+            average_trade_size
+            large_trade_buy_volume
+            large_trade_sell_volume
+            large_trade_imbalance
+            order_flow_aggression
+            order_flow_strength
         """
 
         if not trades:
@@ -563,6 +634,7 @@ class HistoricalContextEngine:
         volumes: list[float] = []
 
         for trade in trades:
+
             volume = max(
                 0.0,
                 float(
@@ -583,9 +655,11 @@ class HistoricalContextEngine:
             )
 
             if side == "buy":
+
                 buy_volume += volume
 
             elif side == "sell":
+
                 sell_volume += volume
 
         total_volume = (
@@ -627,9 +701,9 @@ class HistoricalContextEngine:
             else 0.0
         )
 
-        # ----------------------------------------------
-        # Large trade detection
-        # ----------------------------------------------
+        # ========================================================
+        # LARGE TRADES
+        # ========================================================
 
         large_threshold = (
             average_trade_size
@@ -642,6 +716,7 @@ class HistoricalContextEngine:
         if large_threshold > 0:
 
             for trade in trades:
+
                 volume = max(
                     0.0,
                     float(
@@ -690,22 +765,33 @@ class HistoricalContextEngine:
             else 0.0
         )
 
-        # ----------------------------------------------
-        # Aggression
-        # ----------------------------------------------
+        # ========================================================
+        # ORDER FLOW DIRECTION
+        # ========================================================
 
         if delta_pct >= 15.0:
-            aggression = "BULLISH"
+
+            order_flow_aggression = (
+                "BULLISH"
+            )
 
         elif delta_pct <= -15.0:
-            aggression = "BEARISH"
+
+            order_flow_aggression = (
+                "BEARISH"
+            )
 
         else:
-            aggression = "NEUTRAL"
+
+            order_flow_aggression = (
+                "NEUTRAL"
+            )
 
         order_flow_strength = min(
             100.0,
-            abs(delta_pct),
+            abs(
+                delta_pct
+            ),
         )
 
         return (
@@ -719,113 +805,81 @@ class HistoricalContextEngine:
             large_trade_buy_volume,
             large_trade_sell_volume,
             large_trade_imbalance,
-            aggression,
+            order_flow_aggression,
             order_flow_strength,
         )
 
-    # ======================================================
-    # SESSION
-    # ======================================================
-
-    @classmethod
-    def _session_name(
-        cls,
-        timestamp: int,
-    ) -> str:
-        """
-        Classify the historical timestamp in UTC.
-
-        Windows:
-
-            00:00-08:00  ASIA
-            08:00-13:00  LONDON
-            13:00-17:00  LONDON_NY_OVERLAP
-            17:00-21:00  NEW_YORK
-            21:00-24:00  OFF_HOURS
-        """
-
-        timestamp_seconds = int(
-            timestamp
-        )
-
-        dt = datetime.fromtimestamp(
-            timestamp_seconds,
-            tz=timezone.utc,
-        )
-
-        hour = dt.hour
-
-        if 0 <= hour < 8:
-            return "ASIA"
-
-        if 8 <= hour < 13:
-            return "LONDON"
-
-        if 13 <= hour < 17:
-            return "LONDON_NY_OVERLAP"
-
-        if 17 <= hour < 21:
-            return "NEW_YORK"
-
-        return "OFF_HOURS"
+    # ============================================================
+    # LIQUIDITY ACTIVITY RATIO
+    # ============================================================
 
     @staticmethod
-    def _session_quality(
-        session_name: str,
-        trade_count: int,
-        order_flow_strength: float,
+    def _liquidity_activity_ratio(
+        buy_volume: float,
+        sell_volume: float,
     ) -> float:
         """
-        Return a 0-10 session-quality score.
+        Return a bounded activity/balance ratio.
 
-        Session is not a hard filter.
+        This is deliberately different from directional delta.
 
-        Activity and order-flow strength are allowed to improve
-        the base session quality.
+        A balanced market receives a higher liquidity-quality
+        contribution than a one-sided market of the same volume.
+
+        Result:
+
+            0.0 <= value <= 1.0
         """
 
-        base_scores = {
-            "ASIA": 5.0,
-            "LONDON": 7.0,
-            "LONDON_NY_OVERLAP": 10.0,
-            "NEW_YORK": 8.0,
-            "OFF_HOURS": 3.0,
-        }
-
-        quality = base_scores.get(
-            session_name,
-            3.0,
+        buy = max(
+            0.0,
+            float(
+                buy_volume
+            ),
         )
 
-        # Trade-count confirmation.
-        if trade_count >= 500:
-            quality += 0.5
+        sell = max(
+            0.0,
+            float(
+                sell_volume
+            ),
+        )
 
-        if trade_count >= 1000:
-            quality += 0.5
+        total = (
+            buy
+            + sell
+        )
 
-        # Order-flow confirmation.
-        quality += min(
-            2.0,
-            abs(
-                float(
-                    order_flow_strength
-                )
+        if total <= 0:
+            return 0.0
+
+        balance = (
+            1.0
+            - abs(
+                buy
+                - sell
             )
-            / 50.0,
+            / total
+        )
+
+        activity = min(
+            1.0,
+            total
+            / 1_000_000.0,
         )
 
         return max(
             0.0,
             min(
-                10.0,
-                quality,
+                1.0,
+                balance * 0.7
+                + activity * 0.3,
             ),
         )
 
-    # ======================================================
+    # ============================================================
     # TIMESTAMP
-    # ======================================================
+    # ============================================================
 
     def _detect_timestamp_scale(
         self,
@@ -857,17 +911,16 @@ class HistoricalContextEngine:
 
         return 1
 
-    # ======================================================
+    # ============================================================
     # VWAP
-    # ======================================================
+    # ============================================================
 
     @staticmethod
     def _calculate_vwap(
         trades,
     ) -> float | None:
         """
-        Calculate volume-weighted average price
-        from historical trades only.
+        Calculate historical volume-weighted average price.
         """
 
         total_volume = sum(
@@ -902,7 +955,7 @@ class HistoricalContextEngine:
         timestamp_scale: int,
     ) -> float | None:
         """
-        Calculate VWAP for the previous time slice.
+        Calculate VWAP for the previous historical slice.
         """
 
         if len(trades) < 2:
@@ -950,6 +1003,7 @@ class HistoricalContextEngine:
         price: float,
         vwap: float | None,
     ) -> str:
+
         if vwap is None:
             return "UNKNOWN"
 
@@ -966,6 +1020,7 @@ class HistoricalContextEngine:
         price: float,
         vwap: float | None,
     ) -> float:
+
         if (
             vwap is None
             or vwap == 0
@@ -980,3 +1035,86 @@ class HistoricalContextEngine:
             / abs(vwap)
             * 100.0
         )
+
+    # ============================================================
+    # LEGACY SESSION HELPERS
+    # ============================================================
+
+    @staticmethod
+    def _session_name(
+        timestamp: int,
+    ) -> str:
+        """
+        Backward-compatible session resolver.
+
+        New code should use SessionEngine.
+        """
+
+        dt = datetime.fromtimestamp(
+            int(timestamp),
+            tz=timezone.utc,
+        )
+
+        hour = dt.hour
+
+        if 0 <= hour < 8:
+            return "ASIA"
+
+        if 8 <= hour < 13:
+            return "LONDON"
+
+        if 13 <= hour < 17:
+            return "LONDON_NY_OVERLAP"
+
+        if 17 <= hour < 21:
+            return "NEW_YORK"
+
+        return "OFF_HOURS"
+
+    @staticmethod
+    def _session_quality(
+        session_name: str,
+        trade_count: int,
+        order_flow_strength: float,
+    ) -> float:
+        """
+        Backward-compatible wrapper around SessionEngine.
+
+        New code should use SessionEngine.analyze().
+        """
+
+        # Convert name into a representative UTC timestamp.
+        representative_hour = {
+            "ASIA": 4,
+            "LONDON": 10,
+            "LONDON_NY_OVERLAP": 14,
+            "NEW_YORK": 18,
+            "OFF_HOURS": 22,
+        }.get(
+            str(
+                session_name
+            ).strip().upper(),
+            22,
+        )
+
+        representative_timestamp = (
+            representative_hour
+            * 60
+            * 60
+        )
+
+        result = (
+            SessionEngine.analyze(
+                timestamp=representative_timestamp,
+                trade_count=trade_count,
+                order_flow_strength=(
+                    order_flow_strength
+                ),
+                cvd_strength=(
+                    order_flow_strength
+                ),
+                liquidity_ratio=0.5,
+            )
+        )
+
+        return result.quality
