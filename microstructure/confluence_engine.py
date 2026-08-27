@@ -11,36 +11,34 @@ class ConfluenceEngine:
     """
     Primary market confluence engine.
 
-    Primary score = 100
+    PRIMARY SCORE = 100
 
         Structure / MSS        25
         Liquidity Sweep        15
-        CVD / Delta            15
         Volume Profile         15
-        VWAP                   10
-        Order Flow             10
-        Order Book             10
+        CVD / Delta             15
+        VWAP                    10
+        Order Flow              10
+        --------------------------
+                              90 -> normalized to 100
 
-    Session quality is stored separately and does not change
-    the primary 100-point market score.
+    Order Book:
+        NOT part of the primary score.
 
-    RSI / MACD / EMA are intentionally excluded.
+    Session:
+        NOT part of the primary score.
 
-    Historical safety:
-        Current Order Book data must not be used in historical
-        evaluation unless timestamped historical Level-2 data exists.
+    Order Book + Session:
+        Execution Gate.
 
-    Normalization:
-        When a feature is genuinely unavailable, its weight is
-        removed from the denominator and the available score is
-        normalized to 100.
+    Historical evaluation:
+        Order Book is optional/not applicable.
 
-        This prevents missing Order Book data in Historical mode
-        from artificially reducing the final score.
+    Live evaluation:
+        Order Book confirmation is required for EXECUTE.
 
-    IMPORTANT:
-        Structure + Liquidity alone are NOT sufficient for a signal.
-        At least one real market-context confirmation must exist.
+    RSI / MACD / EMA:
+        intentionally excluded.
     """
 
     STRUCTURE_WEIGHT = 25.0
@@ -49,9 +47,32 @@ class ConfluenceEngine:
     PROFILE_WEIGHT = 15.0
     VWAP_WEIGHT = 10.0
     ORDER_FLOW_WEIGHT = 10.0
-    ORDER_BOOK_WEIGHT = 10.0
+
+    PRIMARY_MAX_SCORE = (
+        STRUCTURE_WEIGHT
+        + LIQUIDITY_WEIGHT
+        + CVD_WEIGHT
+        + PROFILE_WEIGHT
+        + VWAP_WEIGHT
+        + ORDER_FLOW_WEIGHT
+    )
 
     MAX_SCORE = 100.0
+
+    # ------------------------------------------------------------
+    # Order Book
+    # ------------------------------------------------------------
+
+    OB_NEUTRAL_THRESHOLD = 0.10
+    OB_MODERATE_OPPOSING = 0.20
+    OB_STRONG_OPPOSING = 0.35
+
+    # ------------------------------------------------------------
+    # Session
+    # ------------------------------------------------------------
+
+    SESSION_EXECUTE_MIN = 8.0
+    SESSION_WAIT_MIN = 5.0
 
     def evaluate(
         self,
@@ -63,12 +84,18 @@ class ConfluenceEngine:
         order_book: Any | None = None,
         session: Any | None = None,
         historical_context: Any | None = None,
+        live_mode: bool = False,
     ) -> ConfluenceResult:
         """
-        Evaluate one structure setup.
+        Evaluate one directional setup.
 
-        Context objects support duck typing so existing tests and
-        historical/live context objects remain compatible.
+        live_mode=False:
+            Historical evaluation.
+            Order Book is optional/not applicable.
+
+        live_mode=True:
+            Production live evaluation.
+            Current Order Book acts as an execution gate.
         """
 
         direction = self._normalize_direction(
@@ -95,6 +122,8 @@ class ConfluenceEngine:
                 order_book_points=0.0,
                 session_quality=0.0,
                 session_name="UNKNOWN",
+                order_book_imbalance=0.0,
+                execution_status="BLOCK",
                 confirmations=(),
                 conflicts=(
                     "Invalid or neutral structure setup",
@@ -131,15 +160,6 @@ class ConfluenceEngine:
             if session is None:
                 session = historical_context
 
-        # --------------------------------------------------------
-        # Determine whether each context is genuinely available.
-        #
-        # HistoricalContext contains default neutral/zero values
-        # even when a unit test did not actually provide an
-        # Order Flow context. We must not count that as a real
-        # confirmation source.
-        # --------------------------------------------------------
-
         cvd_available = (
             cvd is not None
         )
@@ -158,12 +178,8 @@ class ConfluenceEngine:
             )
         )
 
-        order_book_available = (
-            order_book is not None
-        )
-
         # --------------------------------------------------------
-        # 1. Structure / MSS
+        # PRIMARY SCORE
         # --------------------------------------------------------
 
         structure_points = (
@@ -175,10 +191,6 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
-        # 2. Liquidity Sweep
-        # --------------------------------------------------------
-
         liquidity_points = (
             self._score_liquidity(
                 setup=setup,
@@ -187,10 +199,6 @@ class ConfluenceEngine:
                 reasons=reasons,
             )
         )
-
-        # --------------------------------------------------------
-        # 3. CVD / Delta
-        # --------------------------------------------------------
 
         cvd_points = (
             self._score_cvd(
@@ -202,10 +210,6 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
-        # 4. Volume Profile
-        # --------------------------------------------------------
-
         profile_points = (
             self._score_profile(
                 direction=direction,
@@ -216,10 +220,6 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
-        # 5. VWAP
-        # --------------------------------------------------------
-
         vwap_points = (
             self._score_vwap(
                 direction=direction,
@@ -229,10 +229,6 @@ class ConfluenceEngine:
                 reasons=reasons,
             )
         )
-
-        # --------------------------------------------------------
-        # 6. Order Flow
-        # --------------------------------------------------------
 
         order_flow_points = (
             self._score_order_flow(
@@ -248,53 +244,51 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
-        # 7. Order Book
-        # --------------------------------------------------------
-
-        order_book_points = (
-            self._score_order_book(
-                direction=direction,
-                order_book=(
-                    order_book
-                    if order_book_available
-                    else None
-                ),
-                confirmations=confirmations,
-                conflicts=conflicts,
-                reasons=reasons,
-            )
-        )
-
-        # --------------------------------------------------------
-        # Raw primary score
-        # --------------------------------------------------------
-
-        raw_score = (
+        raw_primary_score = (
             structure_points
             + liquidity_points
             + cvd_points
             + profile_points
             + vwap_points
             + order_flow_points
-            + order_book_points
         )
 
-        # --------------------------------------------------------
-        # Genuine market-context confirmation
-        #
-        # Structure + Liquidity alone must not become A/A+.
-        # --------------------------------------------------------
+        available_max_score = (
+            structure_points
+            + self.LIQUIDITY_WEIGHT
+        )
+
+        if cvd_available:
+            available_max_score += (
+                self.CVD_WEIGHT
+            )
+
+        if profile_available:
+            available_max_score += (
+                self.PROFILE_WEIGHT
+            )
+
+        if vwap_available:
+            available_max_score += (
+                self.VWAP_WEIGHT
+            )
+
+        if order_flow_available:
+            available_max_score += (
+                self.ORDER_FLOW_WEIGHT
+            )
 
         has_real_context = (
             cvd_available
             or profile_available
             or vwap_available
             or order_flow_available
-            or order_book_available
         )
 
-        if not has_real_context:
+        if (
+            not has_real_context
+            or available_max_score <= 0
+        ):
             score = 0.0
 
             reasons.append(
@@ -304,55 +298,11 @@ class ConfluenceEngine:
 
         else:
 
-            # ----------------------------------------------------
-            # Available weight
-            #
-            # Only genuinely available features participate in
-            # the normalization denominator.
-            # ----------------------------------------------------
-
-            available_max_score = (
-                structure_points
-                + self.LIQUIDITY_WEIGHT
+            score = (
+                raw_primary_score
+                / available_max_score
+                * self.MAX_SCORE
             )
-
-            if cvd_available:
-                available_max_score += (
-                    self.CVD_WEIGHT
-                )
-
-            if profile_available:
-                available_max_score += (
-                    self.PROFILE_WEIGHT
-                )
-
-            if vwap_available:
-                available_max_score += (
-                    self.VWAP_WEIGHT
-                )
-
-            if order_flow_available:
-                available_max_score += (
-                    self.ORDER_FLOW_WEIGHT
-                )
-
-            if order_book_available:
-                available_max_score += (
-                    self.ORDER_BOOK_WEIGHT
-                )
-
-            # ----------------------------------------------------
-            # Normalize available score to 100.
-            # ----------------------------------------------------
-
-            if available_max_score > 0:
-                score = (
-                    raw_score
-                    / available_max_score
-                    * self.MAX_SCORE
-                )
-            else:
-                score = 0.0
 
         score = max(
             0.0,
@@ -363,12 +313,12 @@ class ConfluenceEngine:
         )
 
         # --------------------------------------------------------
-        # Session Quality
+        # SESSION
         # --------------------------------------------------------
 
         session_quality, session_name = (
             self._extract_session(
-                session=session,
+                session=session
             )
         )
 
@@ -380,7 +330,35 @@ class ConfluenceEngine:
         )
 
         # --------------------------------------------------------
-        # Grade
+        # ORDER BOOK
+        #
+        # Diagnostic only for score.
+        # Execution gate decides its live effect.
+        # --------------------------------------------------------
+
+        order_book_imbalance = 0.0
+
+        if order_book is not None:
+
+            order_book_imbalance = (
+                self._safe_float(
+                    getattr(
+                        order_book,
+                        "imbalance",
+                        0.0,
+                    )
+                )
+            )
+
+        order_book_points = (
+            self._diagnostic_order_book_score(
+                direction=direction,
+                order_book=order_book,
+            )
+        )
+
+        # --------------------------------------------------------
+        # GRADE
         # --------------------------------------------------------
 
         grade = self._grade(
@@ -388,37 +366,59 @@ class ConfluenceEngine:
             conflicts=len(conflicts),
         )
 
-        has_hard_conflict = bool(
-            conflicts
+        # --------------------------------------------------------
+        # EXECUTION GATE
+        # --------------------------------------------------------
+
+        execution_status = (
+            self._execution_gate(
+                direction=direction,
+                grade=grade,
+                session_quality=session_quality,
+                order_book=order_book,
+                order_book_imbalance=(
+                    order_book_imbalance
+                ),
+                conflicts=conflicts,
+                confirmations=confirmations,
+                reasons=reasons,
+                live_mode=live_mode,
+            )
         )
 
-        # Weak session is not a market conflict.
-        # It only prevents automatic action.
-        session_allows_execution = (
-            session_quality <= 0.0
-            or session_quality >= 5.0
-        )
+        # --------------------------------------------------------
+        # ACTIONABLE
+        # --------------------------------------------------------
 
-        actionable = (
-            grade in {
-                "A+",
-                "A",
-            }
-            and not has_hard_conflict
-            and session_allows_execution
-            and has_real_context
-        )
+        if live_mode:
 
-        if (
-            grade in {
-                "A+",
-                "A",
-            }
-            and not session_allows_execution
-        ):
-            reasons.append(
-                "Session quality is below the execution "
-                f"threshold: {session_quality:.2f}/10."
+            actionable = (
+                execution_status
+                == "EXECUTE"
+                and grade in {
+                    "A+",
+                    "A",
+                }
+                and not conflicts
+                and has_real_context
+            )
+
+        else:
+
+            # Historical evaluation:
+            # Order Book is not required.
+            actionable = (
+                grade in {
+                    "A+",
+                    "A",
+                }
+                and not conflicts
+                and (
+                    session_quality <= 0.0
+                    or session_quality
+                    >= self.SESSION_WAIT_MIN
+                )
+                and has_real_context
             )
 
         return self._build_result(
@@ -433,6 +433,10 @@ class ConfluenceEngine:
             order_book_points=order_book_points,
             session_quality=session_quality,
             session_name=session_name,
+            order_book_imbalance=(
+                order_book_imbalance
+            ),
+            execution_status=execution_status,
             confirmations=tuple(
                 confirmations
             ),
@@ -470,6 +474,7 @@ class ConfluenceEngine:
             "BULLISH",
             "BEARISH",
         }:
+
             conflicts.append(
                 "Invalid structure direction"
             )
@@ -514,7 +519,7 @@ class ConfluenceEngine:
         return self.LIQUIDITY_WEIGHT
 
     # ============================================================
-    # CVD / DELTA
+    # CVD
     # ============================================================
 
     def _score_cvd(
@@ -527,6 +532,7 @@ class ConfluenceEngine:
     ) -> float:
 
         if cvd is None:
+
             reasons.append(
                 "CVD context unavailable."
             )
@@ -585,6 +591,7 @@ class ConfluenceEngine:
             cvd_direction == direction
             and strength >= 60.0
         ):
+
             confirmations.append(
                 "CVD strong directional alignment"
             )
@@ -601,6 +608,7 @@ class ConfluenceEngine:
                 "NEUTRAL",
                 "UNKNOWN",
             }:
+
                 reasons.append(
                     f"CVD divergence={divergence}."
                 )
@@ -608,6 +616,7 @@ class ConfluenceEngine:
             return self.CVD_WEIGHT
 
         if cvd_direction == direction:
+
             confirmations.append(
                 "CVD directional alignment"
             )
@@ -619,6 +628,7 @@ class ConfluenceEngine:
             return 8.0
 
         if cvd_direction == "NEUTRAL":
+
             reasons.append(
                 "CVD is neutral."
             )
@@ -650,6 +660,7 @@ class ConfluenceEngine:
     ) -> float:
 
         if profile is None:
+
             reasons.append(
                 "Volume Profile context unavailable."
             )
@@ -701,6 +712,7 @@ class ConfluenceEngine:
             }
 
         if location in supportive:
+
             confirmations.append(
                 "Volume Profile location supportive"
             )
@@ -713,6 +725,7 @@ class ConfluenceEngine:
             return self.PROFILE_WEIGHT
 
         if location in opposing:
+
             conflicts.append(
                 "Volume Profile location opposing setup"
             )
@@ -729,6 +742,7 @@ class ConfluenceEngine:
             "INSIDE_VALUE",
             "INSIDE_VA",
         }:
+
             confirmations.append(
                 "Price inside Volume Profile value area"
             )
@@ -759,6 +773,7 @@ class ConfluenceEngine:
     ) -> float:
 
         if vwap is None:
+
             reasons.append(
                 "VWAP context unavailable."
             )
@@ -794,6 +809,7 @@ class ConfluenceEngine:
         )
 
         if vwap_direction == direction:
+
             confirmations.append(
                 "VWAP directional alignment"
             )
@@ -809,6 +825,7 @@ class ConfluenceEngine:
             and vwap_position == "ABOVE_VWAP"
             and vwap_slope > 0
         ):
+
             confirmations.append(
                 "Price above rising VWAP"
             )
@@ -824,6 +841,7 @@ class ConfluenceEngine:
             and vwap_position == "BELOW_VWAP"
             and vwap_slope < 0
         ):
+
             confirmations.append(
                 "Price below falling VWAP"
             )
@@ -835,6 +853,7 @@ class ConfluenceEngine:
             return self.VWAP_WEIGHT
 
         if vwap_direction == "NEUTRAL":
+
             reasons.append(
                 "VWAP is neutral."
             )
@@ -866,6 +885,7 @@ class ConfluenceEngine:
     ) -> float:
 
         if order_flow is None:
+
             reasons.append(
                 "Order Flow context unavailable."
             )
@@ -904,38 +924,47 @@ class ConfluenceEngine:
             )
         )
 
-        if (
-            direction == "BULLISH"
-            and aggression == "BULLISH"
-        ) or (
-            direction == "BEARISH"
-            and aggression == "BEARISH"
-        ):
+        aligned = (
+            (
+                direction == "BULLISH"
+                and aggression == "BULLISH"
+            )
+            or
+            (
+                direction == "BEARISH"
+                and aggression == "BEARISH"
+            )
+        )
 
-            if strength >= 60.0:
-                confirmations.append(
-                    "Order Flow strong directional alignment"
-                )
+        if aligned and strength >= 60.0:
 
-                reasons.append(
-                    f"Order Flow {aggression}, "
-                    f"strength={strength:.2f}, "
-                    f"delta_pct={delta_pct:.2f}%."
-                )
+            confirmations.append(
+                "Order Flow strong directional alignment"
+            )
 
-                return self.ORDER_FLOW_WEIGHT
+            reasons.append(
+                f"Order Flow {aggression}, "
+                f"strength={strength:.2f}, "
+                f"delta_pct={delta_pct:.2f}%."
+            )
+
+            return self.ORDER_FLOW_WEIGHT
+
+        if aligned:
 
             confirmations.append(
                 "Order Flow directional alignment"
             )
 
             reasons.append(
-                f"Order Flow {aggression} aligns with {direction}."
+                f"Order Flow {aggression} aligns with "
+                f"{direction}."
             )
 
             return 6.0
 
         if aggression == "NEUTRAL":
+
             reasons.append(
                 "Order Flow is neutral."
             )
@@ -954,24 +983,16 @@ class ConfluenceEngine:
         return 0.0
 
     # ============================================================
-    # ORDER BOOK
+    # ORDER BOOK DIAGNOSTIC
     # ============================================================
 
-    def _score_order_book(
+    def _diagnostic_order_book_score(
         self,
         direction: str,
         order_book: Any | None,
-        confirmations: list[str],
-        conflicts: list[str],
-        reasons: list[str],
     ) -> float:
 
         if order_book is None:
-            reasons.append(
-                "Order Book unavailable; "
-                "live L2 score not applied."
-            )
-
             return 0.0
 
         imbalance = self._safe_float(
@@ -982,127 +1003,275 @@ class ConfluenceEngine:
             )
         )
 
-        wall_bias = str(
-            getattr(
-                order_book,
-                "wall_bias",
-                "NEUTRAL",
+        absolute_imbalance = abs(
+            imbalance
+        )
+
+        aligned = (
+            (
+                direction == "BULLISH"
+                and imbalance > 0
             )
-        ).strip().upper()
-
-        if direction == "BULLISH":
-
-            aligned = (
-                imbalance >= 0.15
-                or wall_bias == "BULLISH"
+            or
+            (
+                direction == "BEARISH"
+                and imbalance < 0
             )
+        )
 
-            opposing = (
-                imbalance <= -0.15
-                or wall_bias == "BEARISH"
-            )
-
-        else:
-
-            aligned = (
-                imbalance <= -0.15
-                or wall_bias == "BEARISH"
-            )
-
-            opposing = (
-                imbalance >= 0.15
-                or wall_bias == "BULLISH"
-            )
-
-        if aligned and abs(imbalance) >= 0.30:
-            confirmations.append(
-                "Order Book strong imbalance alignment"
-            )
-
-            reasons.append(
-                f"Order Book imbalance={imbalance:.3f} "
-                f"supports {direction}."
-            )
-
-            return self.ORDER_BOOK_WEIGHT
+        if (
+            absolute_imbalance
+            < self.OB_NEUTRAL_THRESHOLD
+        ):
+            return 5.0
 
         if aligned:
-            confirmations.append(
-                "Order Book imbalance alignment"
-            )
 
-            reasons.append(
-                f"Order Book imbalance={imbalance:.3f} "
-                f"aligns with {direction}."
-            )
+            if (
+                absolute_imbalance
+                >= self.OB_STRONG_OPPOSING
+            ):
+                return 10.0
+
+            if (
+                absolute_imbalance
+                >= self.OB_MODERATE_OPPOSING
+            ):
+                return 8.0
 
             return 6.0
 
-        if opposing:
-            conflicts.append(
-                "Order Book imbalance opposing setup"
+        if (
+            absolute_imbalance
+            < self.OB_MODERATE_OPPOSING
+        ):
+            return 4.0
+
+        if (
+            absolute_imbalance
+            < self.OB_STRONG_OPPOSING
+        ):
+            return 2.0
+
+        return 0.0
+
+    # ============================================================
+    # EXECUTION GATE
+    # ============================================================
+
+    def _execution_gate(
+        self,
+        direction: str,
+        grade: str,
+        session_quality: float,
+        order_book: Any | None,
+        order_book_imbalance: float,
+        conflicts: list[str],
+        confirmations: list[str],
+        reasons: list[str],
+        live_mode: bool,
+    ) -> str:
+
+        # --------------------------------------------------------
+        # Historical mode
+        #
+        # Order Book is not required.
+        # --------------------------------------------------------
+
+        if not live_mode:
+
+            if conflicts:
+
+                reasons.append(
+                    "Historical evaluation contains primary "
+                    "market conflict."
+                )
+
+                return "BLOCK"
+
+            if grade not in {
+                "A+",
+                "A",
+            }:
+
+                return "WAIT"
+
+            if (
+                session_quality > 0
+                and
+                session_quality
+                < self.SESSION_WAIT_MIN
+            ):
+
+                reasons.append(
+                    "Historical setup is strong but session "
+                    f"quality={session_quality:.2f}/10."
+                )
+
+                return "WAIT"
+
+            return "HISTORICAL_OK"
+
+        # --------------------------------------------------------
+        # LIVE mode
+        # --------------------------------------------------------
+
+        if conflicts:
+
+            reasons.append(
+                "Execution gate = BLOCK because the primary "
+                "confluence contains a hard conflict."
+            )
+
+            return "BLOCK"
+
+        if grade not in {
+            "A+",
+            "A",
+        }:
+
+            reasons.append(
+                f"Execution gate = WAIT because grade={grade}."
+            )
+
+            return "WAIT"
+
+        if (
+            session_quality > 0
+            and
+            session_quality
+            < self.SESSION_WAIT_MIN
+        ):
+
+            reasons.append(
+                "Execution gate = WAIT because session "
+                f"quality={session_quality:.2f}/10."
+            )
+
+            return "WAIT"
+
+        if order_book is None:
+
+            reasons.append(
+                "Execution gate = WAIT because current "
+                "Order Book is unavailable."
+            )
+
+            return "WAIT"
+
+        absolute_imbalance = abs(
+            order_book_imbalance
+        )
+
+        aligned = (
+            (
+                direction == "BULLISH"
+                and order_book_imbalance >= 0
+            )
+            or
+            (
+                direction == "BEARISH"
+                and order_book_imbalance <= 0
+            )
+        )
+
+        if aligned:
+
+            confirmations.append(
+                "Order Book supports execution direction"
             )
 
             reasons.append(
-                f"Order Book imbalance={imbalance:.3f} "
-                f"opposes {direction}."
+                "Execution gate = EXECUTE: "
+                f"Order Book imbalance="
+                f"{order_book_imbalance:.3f}."
             )
 
-            return 0.0
+            return "EXECUTE"
+
+        if (
+            absolute_imbalance
+            < self.OB_MODERATE_OPPOSING
+        ):
+
+            reasons.append(
+                f"Execution gate = WAIT: mild opposing "
+                f"Order Book imbalance="
+                f"{order_book_imbalance:.3f}."
+            )
+
+            return "WAIT"
+
+        if (
+            absolute_imbalance
+            < self.OB_STRONG_OPPOSING
+        ):
+
+            reasons.append(
+                f"Execution gate = WAIT: material opposing "
+                f"Order Book imbalance="
+                f"{order_book_imbalance:.3f}."
+            )
+
+            return "WAIT"
 
         reasons.append(
-            "Order Book imbalance is neutral."
+            f"Execution gate = BLOCK: extreme opposing "
+            f"Order Book imbalance="
+            f"{order_book_imbalance:.3f}."
         )
 
-        return 5.0
+        return "BLOCK"
 
     # ============================================================
-    # AVAILABILITY
+    # ORDER FLOW AVAILABILITY
     # ============================================================
 
     @staticmethod
     def _order_flow_is_available(
         order_flow: Any | None,
     ) -> bool:
-        """
-        Detect whether Order Flow is genuinely populated.
-
-        HistoricalContext always has default values, so simply
-        checking `order_flow is not None` is not sufficient.
-        """
 
         if order_flow is None:
             return False
 
-        buy_volume = ConfluenceEngine._safe_float(
-            getattr(
-                order_flow,
-                "buy_volume",
-                0.0,
+        buy_volume = (
+            ConfluenceEngine._safe_float(
+                getattr(
+                    order_flow,
+                    "buy_volume",
+                    0.0,
+                )
             )
         )
 
-        sell_volume = ConfluenceEngine._safe_float(
-            getattr(
-                order_flow,
-                "sell_volume",
-                0.0,
+        sell_volume = (
+            ConfluenceEngine._safe_float(
+                getattr(
+                    order_flow,
+                    "sell_volume",
+                    0.0,
+                )
             )
         )
 
-        delta = ConfluenceEngine._safe_float(
-            getattr(
-                order_flow,
-                "delta",
-                0.0,
+        delta = (
+            ConfluenceEngine._safe_float(
+                getattr(
+                    order_flow,
+                    "delta",
+                    0.0,
+                )
             )
         )
 
-        delta_pct = ConfluenceEngine._safe_float(
-            getattr(
-                order_flow,
-                "delta_pct",
-                0.0,
+        delta_pct = (
+            ConfluenceEngine._safe_float(
+                getattr(
+                    order_flow,
+                    "delta_pct",
+                    0.0,
+                )
             )
         )
 
@@ -1116,9 +1285,6 @@ class ConfluenceEngine:
             )
         )
 
-        # Real historical Order Flow must have actual trade
-        # evidence. This avoids counting default zero/neutral
-        # dataclass fields as an available feature.
         return (
             trade_count > 0
             or abs(buy_volume) > 0.0
@@ -1148,6 +1314,7 @@ class ConfluenceEngine:
             "session_quality",
             "quality_score",
         ):
+
             value = getattr(
                 session,
                 attribute,
@@ -1155,6 +1322,7 @@ class ConfluenceEngine:
             )
 
             if value is not None:
+
                 quality = max(
                     0.0,
                     min(
@@ -1164,6 +1332,7 @@ class ConfluenceEngine:
                         ),
                     ),
                 )
+
                 break
 
         name = str(
@@ -1200,16 +1369,19 @@ class ConfluenceEngine:
         )
 
         if session_quality >= 8.0:
+
             confirmations.append(
                 "High-quality trading session"
             )
 
         elif session_quality >= 5.0:
+
             confirmations.append(
                 "Acceptable trading session"
             )
 
         else:
+
             reasons.append(
                 "Session liquidity quality is weak."
             )
@@ -1277,7 +1449,10 @@ class ConfluenceEngine:
     ) -> float:
 
         try:
-            result = float(value)
+
+            result = float(
+                value
+            )
 
             if result != result:
                 return 0.0
@@ -1309,6 +1484,8 @@ class ConfluenceEngine:
         order_book_points: float,
         session_quality: float,
         session_name: str,
+        order_book_imbalance: float,
+        execution_status: str,
         confirmations: tuple[str, ...],
         conflicts: tuple[str, ...],
         reasons: tuple[str, ...],
@@ -1349,7 +1526,6 @@ class ConfluenceEngine:
             confirmations=confirmations,
             conflicts=conflicts,
             reasons=reasons,
-
             actionable=actionable,
 
             liquidity_points=round(
@@ -1373,4 +1549,13 @@ class ConfluenceEngine:
             ),
 
             session_name=session_name,
+
+            execution_status=(
+                execution_status
+            ),
+
+            order_book_imbalance=round(
+                order_book_imbalance,
+                4,
+            ),
         )

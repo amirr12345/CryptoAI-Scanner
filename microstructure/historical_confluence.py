@@ -20,7 +20,7 @@ class HistoricalConfluenceEngine:
     """
     Integrate Structure Setup with Historical Context.
 
-    Historical data:
+    Historical information:
 
         CVD
         Delta
@@ -33,20 +33,18 @@ class HistoricalConfluenceEngine:
 
         Current Order Book
 
-    IMPORTANT:
+    live_mode=False:
+        Historical evaluation only.
 
-        The historical context remains strictly as-of the setup
-        timestamp.
-
-        Current Order Book is accepted only as an optional live
-        confirmation and must never be stored inside the historical
-        context itself.
+    live_mode=True:
+        Current Order Book becomes an execution gate.
     """
 
     def __init__(
         self,
         confluence_engine: ConfluenceEngine | None = None,
     ) -> None:
+
         self.confluence = (
             confluence_engine
             if confluence_engine is not None
@@ -58,18 +56,20 @@ class HistoricalConfluenceEngine:
         setup: StructureSetup,
         context: HistoricalContext,
         order_book=None,
+        live_mode: bool = False,
     ) -> ConfluenceResult:
         """
-        Evaluate one StructureSetup.
+        Evaluate one StructureSetup using historical context.
 
-        `order_book` is optional and is intended only for live
-        confirmation.
+        order_book:
+            Optional current live Order Book.
 
-        Historical callers should leave it as None.
+        live_mode:
+            True only for production live execution.
         """
 
         # --------------------------------------------------------
-        # Timestamp protection
+        # Timestamp safety
         # --------------------------------------------------------
 
         if int(
@@ -92,7 +92,7 @@ class HistoricalConfluenceEngine:
             )
 
         # --------------------------------------------------------
-        # CVD / Delta
+        # CVD
         # --------------------------------------------------------
 
         cvd = SimpleNamespace(
@@ -247,13 +247,7 @@ class HistoricalConfluenceEngine:
         )
 
         # --------------------------------------------------------
-        # Order Book
-        #
-        # Historical call:
-        #     None
-        #
-        # Live call:
-        #     current live order-book context
+        # Final Engine
         # --------------------------------------------------------
 
         return self.confluence.evaluate(
@@ -265,6 +259,7 @@ class HistoricalConfluenceEngine:
             order_book=order_book,
             session=session,
             historical_context=context,
+            live_mode=live_mode,
         )
 
     @staticmethod
@@ -272,11 +267,7 @@ class HistoricalConfluenceEngine:
         context: HistoricalContext,
     ) -> str:
         """
-        Derive VWAP directional bias from historical VWAP slope.
-
-        Positive slope -> BULLISH
-        Negative slope -> BEARISH
-        Flat -> NEUTRAL
+        Derive VWAP direction from historical VWAP slope.
         """
 
         slope = float(

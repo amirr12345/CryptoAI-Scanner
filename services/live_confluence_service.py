@@ -57,15 +57,13 @@ class LiveConfluenceService:
     """
     Live structure/confluence pipeline.
 
-    Pipeline:
+    Production LIVE:
 
         Candles
           ↓
         Freshness
           ↓
-        Market Structure
-          ↓
-        Structure Break / MSS
+        Structure / MSS
           ↓
         Liquidity Sweep
           ↓
@@ -73,30 +71,19 @@ class LiveConfluenceService:
           ↓
         Historical Context
           ↓
-        Current Live Order Book
+        Current Order Book
+          ↓
+        Execution Gate
+
+    REST/Historical:
+
+        Candidate
+          ↓
+        Historical Context
           ↓
         Historical Confluence
-          ↓
-        Final Live Signal
 
-    Candidate-first support:
-
-        find_candidate()
-
-    Important architecture rule:
-
-        Historical Context:
-            - CVD
-            - VWAP
-            - Volume Profile
-            - Order Flow
-            - Session
-
-        Live-only:
-            - Current Order Book Imbalance
-
-    This prevents current Level-2 data from leaking into
-    historical calculations.
+    Historical calculations never use current Order Book.
     """
 
     ORDER_BOOK_DEPTH = 20
@@ -117,10 +104,8 @@ class LiveConfluenceService:
         min_candles_for_structure: int = 20,
         order_book_depth: int = 20,
     ) -> None:
-        if (
-            min_candles_for_structure
-            <= 0
-        ):
+
+        if min_candles_for_structure <= 0:
             raise ValueError(
                 "min_candles_for_structure "
                 "must be greater than zero."
@@ -209,12 +194,6 @@ class LiveConfluenceService:
         timeframe: str = "60",
         limit: int = 200,
     ) -> list[Candle]:
-        """
-        Return the best available candle set.
-
-        Live CandleStore is preferred.
-        Bootstrap candles are merged with live candles.
-        """
 
         normalized_symbol = (
             symbol.strip().upper()
@@ -265,6 +244,7 @@ class LiveConfluenceService:
         symbol: str,
         timeframe: str = "60",
     ) -> Candle | None:
+
         return self.candle_store.latest(
             symbol=symbol,
             timeframe=timeframe,
@@ -274,24 +254,38 @@ class LiveConfluenceService:
     # ORDER BOOK
     # ============================================================
 
+    @staticmethod
+    def _normalize_orderbook_symbol(
+        symbol: str,
+    ) -> str:
+
+        normalized = (
+            str(symbol)
+            .strip()
+            .upper()
+        )
+
+        if normalized.endswith(
+            "USDT"
+        ):
+            return normalized
+
+        return f"{normalized}USDT"
+
     def _get_live_order_book_context(
         self,
         symbol: str,
     ):
-        """
-        Fetch the current live Order Book and convert it into
-        the duck-typed context expected by ConfluenceEngine.
 
-        Historical evaluation MUST NOT call this method.
-        """
-
-        normalized_symbol = (
-            symbol.strip().upper()
+        market_symbol = (
+            self._normalize_orderbook_symbol(
+                symbol
+            )
         )
 
         order_book = (
             self.market_service.orderbook(
-                symbol=normalized_symbol,
+                symbol=market_symbol,
                 depth=self.order_book_depth,
             )
         )
@@ -317,8 +311,6 @@ class LiveConfluenceService:
             )
         )
 
-        # A simple directional wall/depth bias derived from
-        # the same Level-2 snapshot.
         if imbalance >= 0.15:
             wall_bias = "BULLISH"
 
@@ -343,6 +335,7 @@ class LiveConfluenceService:
             and best_ask is not None
             and float(best_bid.price) > 0
         ):
+
             spread_pct = (
                 (
                     float(best_ask.price)
@@ -353,29 +346,42 @@ class LiveConfluenceService:
             )
 
         return SimpleNamespace(
+            symbol=market_symbol,
+
             imbalance=float(
                 imbalance
             ),
+
             bid_volume=float(
                 bid_volume
             ),
+
             ask_volume=float(
                 ask_volume
             ),
+
             best_bid=(
-                float(best_bid.price)
+                float(
+                    best_bid.price
+                )
                 if best_bid is not None
                 else None
             ),
+
             best_ask=(
-                float(best_ask.price)
+                float(
+                    best_ask.price
+                )
                 if best_ask is not None
                 else None
             ),
+
             spread_pct=float(
                 spread_pct
             ),
+
             wall_bias=wall_bias,
+
             timestamp=int(
                 order_book.timestamp
             ),
@@ -385,14 +391,9 @@ class LiveConfluenceService:
         self,
         symbol: str,
     ):
-        """
-        Safe live Order Book wrapper.
-
-        A temporary L2/API failure must not destroy the
-        entire Structure/CVD/Profile/VWAP signal.
-        """
 
         try:
+
             return (
                 self._get_live_order_book_context(
                     symbol=symbol
@@ -400,10 +401,113 @@ class LiveConfluenceService:
             )
 
         except Exception:
+
             return None
 
     # ============================================================
-    # PREPARATION
+    # BENCHMARK ORDER BOOK CONFIRMATION
+    # ============================================================
+
+    def evaluate_order_book_confirmation(
+        self,
+        symbol: str,
+        setup: StructureSetup,
+        context,
+        order_book=None,
+    ) -> LiveConfluenceResult:
+        """
+        Apply current Order Book to an already reconstructed
+        historical setup/context.
+
+        This bypasses candle freshness intentionally.
+
+        It is designed for feature-impact benchmarking.
+        """
+
+        normalized_symbol = (
+            symbol.strip().upper()
+        )
+
+        if setup is None:
+
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=None,
+                confluence=None,
+                status="NO_STRUCTURE_SETUP",
+                reason=(
+                    "Setup is required for Order Book "
+                    "confirmation."
+                ),
+            )
+
+        if context is None:
+
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=setup,
+                confluence=None,
+                status="NO_HISTORICAL_DATA",
+                reason=(
+                    "Historical context is required for "
+                    "Order Book confirmation."
+                ),
+            )
+
+        if order_book is None:
+
+            order_book = (
+                self._get_live_order_book_safe(
+                    symbol=normalized_symbol
+                )
+            )
+
+        if order_book is None:
+
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=setup,
+                confluence=None,
+                status="ORDER_BOOK_UNAVAILABLE",
+                reason=(
+                    "Current Order Book was unavailable."
+                ),
+            )
+
+        try:
+
+            confluence = (
+                self.historical_confluence.evaluate(
+                    setup=setup,
+                    context=context,
+                    order_book=order_book,
+                    live_mode=True,
+                )
+            )
+
+        except Exception as exc:
+
+            return LiveConfluenceResult(
+                symbol=normalized_symbol,
+                setup=setup,
+                confluence=None,
+                status="CONFLUENCE_ERROR",
+                reason=str(exc),
+            )
+
+        return LiveConfluenceResult(
+            symbol=normalized_symbol,
+            setup=setup,
+            confluence=confluence,
+            status="ORDER_BOOK_CONFIRMED",
+            reason=(
+                "Historical setup/context enriched with "
+                "current live Order Book execution gate."
+            ),
+        )
+
+    # ============================================================
+    # PREPARE ANALYSIS
     # ============================================================
 
     def _prepare_analysis(
@@ -419,15 +523,6 @@ class LiveConfluenceService:
         Candle | None,
         LiveConfluenceResult | None,
     ]:
-        """
-        Prepare candles and apply freshness policy.
-
-        LIVE:
-            freshness is enforced.
-
-        REST_BOOTSTRAP:
-            historical candle age does not invalidate the data.
-        """
 
         normalized_symbol = (
             symbol.strip().upper()
@@ -450,6 +545,7 @@ class LiveConfluenceService:
         )
 
         if not analysis_candles:
+
             return (
                 [],
                 None,
@@ -469,11 +565,13 @@ class LiveConfluenceService:
             == LiveDataFreshness.LIVE
             and live_candle is not None
         ):
+
             latest_candle = (
                 live_candle
             )
 
         else:
+
             latest_candle = (
                 live_candle
                 if (
@@ -489,7 +587,9 @@ class LiveConfluenceService:
             and data_mode
             == LiveDataFreshness.LIVE
         ):
+
             try:
+
                 latest_trade_timestamp = (
                     self.historical_context
                     .trade_store
@@ -497,10 +597,13 @@ class LiveConfluenceService:
                         normalized_symbol
                     )
                 )
+
             except Exception:
+
                 latest_trade_timestamp = None
 
         try:
+
             freshness = (
                 self.freshness.check(
                     latest_candle_timestamp=int(
@@ -514,6 +617,7 @@ class LiveConfluenceService:
             )
 
         except Exception as exc:
+
             return (
                 analysis_candles,
                 latest_candle,
@@ -521,14 +625,13 @@ class LiveConfluenceService:
                     symbol=normalized_symbol,
                     setup=None,
                     confluence=None,
-                    status=(
-                        "FRESHNESS_CHECK_ERROR"
-                    ),
+                    status="FRESHNESS_CHECK_ERROR",
                     reason=str(exc),
                 ),
             )
 
         if not freshness.fresh:
+
             return (
                 analysis_candles,
                 latest_candle,
@@ -550,6 +653,7 @@ class LiveConfluenceService:
             len(analysis_candles)
             < self.min_candles_for_structure
         ):
+
             return (
                 analysis_candles,
                 latest_candle,
@@ -588,12 +692,6 @@ class LiveConfluenceService:
         max_bars_after_sweep: int = 10,
         data_mode: str = LiveDataFreshness.LIVE,
     ) -> LiveConfluenceResult:
-        """
-        Run only through Structure Setup.
-
-        Historical Context and Order Book are intentionally not
-        calculated here.
-        """
 
         normalized_symbol = (
             symbol.strip().upper()
@@ -623,6 +721,7 @@ class LiveConfluenceService:
         )
 
         if not structure.swings:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
@@ -642,6 +741,7 @@ class LiveConfluenceService:
         )
 
         if not structure_breaks.events:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
@@ -660,6 +760,7 @@ class LiveConfluenceService:
         )
 
         if not sweeps.events:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
@@ -683,6 +784,7 @@ class LiveConfluenceService:
         )
 
         if not setups.setups:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
@@ -714,7 +816,7 @@ class LiveConfluenceService:
         )
 
     # ============================================================
-    # COMPLETE EVALUATION
+    # PRODUCTION EVALUATION
     # ============================================================
 
     def evaluate(
@@ -730,16 +832,6 @@ class LiveConfluenceService:
         lookback_seconds: int = 3600,
         data_mode: str = LiveDataFreshness.LIVE,
     ) -> LiveConfluenceResult:
-        """
-        Run the complete live/historical confluence pipeline.
-
-        LIVE:
-            Historical context + CURRENT Order Book.
-
-        REST_BOOTSTRAP:
-            Historical context only.
-            Current Order Book is intentionally excluded.
-        """
 
         candidate = (
             self.find_candidate(
@@ -770,6 +862,7 @@ class LiveConfluenceService:
         )
 
         if latest_setup is None:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=None,
@@ -781,11 +874,8 @@ class LiveConfluenceService:
                 ),
             )
 
-        # --------------------------------------------------------
-        # Historical context
-        # --------------------------------------------------------
-
         try:
+
             context = (
                 self.historical_context.calculate(
                     symbol=normalized_symbol,
@@ -799,6 +889,7 @@ class LiveConfluenceService:
             )
 
         except ValueError as exc:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=latest_setup,
@@ -808,6 +899,7 @@ class LiveConfluenceService:
             )
 
         except Exception as exc:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=latest_setup,
@@ -816,38 +908,35 @@ class LiveConfluenceService:
                 reason=str(exc),
             )
 
-        # --------------------------------------------------------
-        # CURRENT live Order Book
-        #
-        # Never call this for REST_BOOTSTRAP/historical mode.
-        # --------------------------------------------------------
-
         live_order_book = None
 
         if (
             data_mode
             == LiveDataFreshness.LIVE
         ):
+
             live_order_book = (
                 self._get_live_order_book_safe(
                     symbol=normalized_symbol
                 )
             )
 
-        # --------------------------------------------------------
-        # HistoricalConfluenceEngine
-        # --------------------------------------------------------
-
         try:
+
             confluence = (
                 self.historical_confluence.evaluate(
                     setup=latest_setup,
                     context=context,
                     order_book=live_order_book,
+                    live_mode=(
+                        data_mode
+                        == LiveDataFreshness.LIVE
+                    ),
                 )
             )
 
         except Exception as exc:
+
             return LiveConfluenceResult(
                 symbol=normalized_symbol,
                 setup=latest_setup,
@@ -856,26 +945,27 @@ class LiveConfluenceService:
                 reason=str(exc),
             )
 
-        # --------------------------------------------------------
-        # Final reason
-        # --------------------------------------------------------
-
         if (
             data_mode
             == LiveDataFreshness.LIVE
         ):
+
             if live_order_book is not None:
+
                 reason = (
-                    "Live historical confluence evaluated "
-                    "with current Order Book confirmation."
+                    "Live confluence evaluated with "
+                    "current Order Book execution gate."
                 )
+
             else:
+
                 reason = (
-                    "Live historical confluence evaluated; "
+                    "Live confluence evaluated, but "
                     "current Order Book was unavailable."
                 )
 
         else:
+
             reason = (
                 "Historical/REST bootstrap confluence "
                 "evaluated without current Order Book."

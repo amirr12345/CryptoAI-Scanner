@@ -9,6 +9,7 @@ from concurrent.futures import (
 from dataclasses import dataclass
 from pathlib import Path
 
+
 PROJECT_ROOT = (
     Path(__file__).resolve().parents[1]
 )
@@ -18,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
         0,
         str(PROJECT_ROOT),
     )
+
 
 from core.candle_store import CandleStore
 from core.market_registry import (
@@ -29,7 +31,12 @@ from services.live_confluence_service import (
     LiveConfluenceResult,
     LiveConfluenceService,
 )
-from services.market_service import MarketService
+from services.live_data_freshness import (
+    LiveDataFreshness,
+)
+from services.market_service import (
+    MarketService,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,7 +60,7 @@ class LiveScanner:
     """
     Candidate-first Gate.io USDT scanner.
 
-    Production pipeline:
+    Pipeline:
 
         Gate.io markets
               ↓
@@ -72,14 +79,24 @@ class LiveScanner:
         Historical Context
                 ↓
         Confluence
+                ↓
+        Live Order Book confirmation
 
-    Performance:
-
-        Candle requests are fetched concurrently using a bounded
-        ThreadPoolExecutor.
-
-    Historical trades remain candidate-only.
+    REST bootstrap candles are evaluated with
+    REST_BOOTSTRAP freshness mode.
     """
+
+    # ==========================================================
+    # DATA MODES
+    # ==========================================================
+
+    DATA_MODE_REST_BOOTSTRAP = (
+        "REST_BOOTSTRAP"
+    )
+
+    DATA_MODE_LIVE = (
+        LiveDataFreshness.LIVE
+    )
 
     def __init__(
         self,
@@ -100,6 +117,7 @@ class LiveScanner:
         max_symbols: int = 100,
         candle_workers: int = 10,
     ) -> None:
+
         self.market_service = (
             market_service
             if market_service is not None
@@ -128,7 +146,8 @@ class LiveScanner:
             confluence_service
             if confluence_service is not None
             else LiveConfluenceService(
-                candle_store=self.candle_store
+                candle_store=self.candle_store,
+                market_service=self.market_service,
             )
         )
 
@@ -140,16 +159,22 @@ class LiveScanner:
             candle_limit
         )
 
-        self.historical_trade_lookback_seconds = int(
-            historical_trade_lookback_seconds
+        self.historical_trade_lookback_seconds = (
+            int(
+                historical_trade_lookback_seconds
+            )
         )
 
-        self.historical_trade_max_pages = int(
-            historical_trade_max_pages
+        self.historical_trade_max_pages = (
+            int(
+                historical_trade_max_pages
+            )
         )
 
-        self.minimum_historical_trades = int(
-            minimum_historical_trades
+        self.minimum_historical_trades = (
+            int(
+                minimum_historical_trades
+            )
         )
 
         self.max_symbols = int(
@@ -202,15 +227,20 @@ class LiveScanner:
                 "candle_workers must be greater than zero."
             )
 
+    # ==========================================================
+    # MARKET SELECTION
+    # ==========================================================
+
     @staticmethod
     def _extract_usdt_markets(
         markets: dict,
         limit: int = 100,
     ) -> list[str]:
         """
-        Select Top-N USDT markets by 24h quote volume.
+        Select top USDT markets by 24h quote volume.
 
         Sorting:
+
             1. Highest quote volume first.
             2. Equal volume -> alphabetical symbol order.
         """
@@ -230,6 +260,7 @@ class LiveScanner:
         ] = []
 
         for key, item in stats.items():
+
             value = (
                 str(key)
                 .strip()
@@ -261,6 +292,7 @@ class LiveScanner:
                         0.0,
                     )
                 )
+
             except (
                 TypeError,
                 ValueError,
@@ -294,6 +326,7 @@ class LiveScanner:
     def _base_from_usdt_market(
         market_symbol: str,
     ) -> str:
+
         value = (
             market_symbol
             .strip()
@@ -322,6 +355,7 @@ class LiveScanner:
         self,
         symbol: str,
     ) -> MarketDescriptor:
+
         normalized = (
             symbol
             .strip()
@@ -350,10 +384,15 @@ class LiveScanner:
             )
         )
 
+    # ==========================================================
+    # TRADE STORE
+    # ==========================================================
+
     def _store_count(
         self,
         symbol: str,
     ) -> int:
+
         method = getattr(
             self.trade_store,
             "count",
@@ -373,6 +412,7 @@ class LiveScanner:
         self,
         symbol: str,
     ) -> int | None:
+
         method = getattr(
             self.trade_store,
             "latest_timestamp",
@@ -386,9 +426,14 @@ class LiveScanner:
 
         return method(symbol)
 
+    # ==========================================================
+    # CANDIDATE PIPELINE
+    # ==========================================================
+
     def _has_candidate_pipeline(
         self,
     ) -> bool:
+
         return callable(
             getattr(
                 self.confluence_service,
@@ -402,6 +447,10 @@ class LiveScanner:
         descriptor: MarketDescriptor,
         candles,
     ) -> LiveConfluenceResult:
+        """
+        Backward-compatible fallback for older test doubles.
+        """
+
         evaluate = getattr(
             self.confluence_service,
             "evaluate",
@@ -426,7 +475,14 @@ class LiveScanner:
             ),
             timeframe=self.timeframe,
             candle_limit=self.candle_limit,
+            data_mode=(
+                self.DATA_MODE_REST_BOOTSTRAP
+            ),
         )
+
+    # ==========================================================
+    # HISTORICAL TRADES
+    # ==========================================================
 
     def _bootstrap_historical_trades(
         self,
@@ -502,18 +558,17 @@ class LiveScanner:
             True,
         )
 
+    # ==========================================================
+    # CANDLES
+    # ==========================================================
+
     def _fetch_candles(
         self,
         symbol: str,
     ):
-        """
-        Fetch one symbol's bootstrap candles.
-
-        Returns:
-            (symbol, candles, error)
-        """
 
         try:
+
             candles = (
                 self.market_service.history(
                     symbol,
@@ -529,6 +584,7 @@ class LiveScanner:
             )
 
         except Exception as exc:
+
             return (
                 symbol,
                 [],
@@ -545,11 +601,6 @@ class LiveScanner:
             Exception | None,
         ],
     ]:
-        """
-        Fetch bootstrap candles concurrently.
-
-        The dictionary preserves every requested symbol.
-        """
 
         result: dict[
             str,
@@ -583,11 +634,13 @@ class LiveScanner:
             for future in as_completed(
                 futures
             ):
+
                 symbol = futures[
                     future
                 ]
 
                 try:
+
                     (
                         returned_symbol,
                         candles,
@@ -595,12 +648,14 @@ class LiveScanner:
                     ) = future.result()
 
                 except Exception as exc:
+
                     result[
                         symbol
                     ] = (
                         [],
                         exc,
                     )
+
                     continue
 
                 result[
@@ -612,16 +667,18 @@ class LiveScanner:
 
         return result
 
+    # ==========================================================
+    # EVALUATION
+    # ==========================================================
+
     def _evaluate_with_candles(
         self,
         descriptor: MarketDescriptor,
         candles,
     ) -> LiveConfluenceResult:
-        """
-        Run candidate-first pipeline using preloaded candles.
-        """
 
         if not self._has_candidate_pipeline():
+
             return self._legacy_evaluate(
                 descriptor=descriptor,
                 candles=candles,
@@ -633,6 +690,9 @@ class LiveScanner:
                 candles=candles,
                 timeframe=self.timeframe,
                 candle_limit=self.candle_limit,
+                data_mode=(
+                    self.DATA_MODE_REST_BOOTSTRAP
+                ),
             )
         )
 
@@ -698,18 +758,20 @@ class LiveScanner:
             ),
             timeframe=self.timeframe,
             candle_limit=self.candle_limit,
+            data_mode=(
+                self.DATA_MODE_REST_BOOTSTRAP
+            ),
         )
+
+    # ==========================================================
+    # SINGLE MARKET
+    # ==========================================================
 
     def scan_market(
         self,
         analysis_market: str,
         candles=None,
     ) -> LiveConfluenceResult:
-        """
-        Scan one market.
-
-        `candles` can be supplied by the parallel bootstrap stage.
-        """
 
         descriptor = (
             self._resolve_market(
@@ -718,7 +780,9 @@ class LiveScanner:
         )
 
         if candles is None:
+
             try:
+
                 candles = (
                     self.market_service.history(
                         descriptor.analysis_market,
@@ -726,7 +790,9 @@ class LiveScanner:
                         countback=self.candle_limit,
                     )
                 )
+
             except Exception as exc:
+
                 return LiveConfluenceResult(
                     symbol=descriptor.base_asset,
                     setup=None,
@@ -735,42 +801,22 @@ class LiveScanner:
                     reason=str(exc),
                 )
 
-        if not self._has_candidate_pipeline():
-            return self._legacy_evaluate(
-                descriptor=descriptor,
-                candles=candles,
-            )
-
         return self._evaluate_with_candles(
             descriptor=descriptor,
             candles=candles,
         )
 
+    # ==========================================================
+    # FULL SCAN
+    # ==========================================================
+
     def scan(
         self,
         symbols: list[str] | None = None,
     ):
-        """
-        Scan configured market universe.
-
-        Default:
-
-            all Gate.io markets
-                 ↓
-            USDT filter
-                 ↓
-            Top 100 by quote volume
-                 ↓
-            parallel candle bootstrap
-                 ↓
-            candidate-first
-                 ↓
-            historical trades only for candidates
-
-        Explicit symbols bypass Top-N selection.
-        """
 
         if symbols is None:
+
             markets = (
                 self.market_service.markets()
             )
@@ -783,14 +829,14 @@ class LiveScanner:
             )
 
         else:
-            symbols = [
-                symbol.strip().upper()
-                for symbol in symbols
-            ]
 
-        # --------------------------------------------------
-        # Parallel candle bootstrap.
-        # --------------------------------------------------
+            symbols = [
+                symbol
+                .strip()
+                .upper()
+                for symbol
+                in symbols
+            ]
 
         candle_map = (
             self._fetch_candles_parallel(
@@ -804,8 +850,11 @@ class LiveScanner:
         grade_counter = Counter()
 
         for symbol in symbols:
+
             analysis_market = (
-                symbol.strip().upper()
+                symbol
+                .strip()
+                .upper()
             )
 
             base_symbol = (
@@ -833,6 +882,7 @@ class LiveScanner:
             )
 
             if candle_error is not None:
+
                 result = (
                     LiveConfluenceResult(
                         symbol=base_symbol,
@@ -847,7 +897,9 @@ class LiveScanner:
                 )
 
             else:
+
                 try:
+
                     result = (
                         self.scan_market(
                             analysis_market,
@@ -856,6 +908,7 @@ class LiveScanner:
                     )
 
                 except Exception as exc:
+
                     result = (
                         LiveConfluenceResult(
                             symbol=base_symbol,
@@ -882,6 +935,7 @@ class LiveScanner:
                 result.confluence
                 is not None
             ):
+
                 grade_counter[
                     result.confluence.grade
                 ] += 1
@@ -949,6 +1003,7 @@ def print_results(
     results,
     summary: ScanSummary,
 ) -> None:
+
     print()
     print(
         "=" * 150
@@ -1040,6 +1095,7 @@ def print_results(
         "CONFLICT",
         "REJECT",
     ):
+
         print(
             f"{grade:<12}: "
             f"{summary.grades.get(grade, 0)}"
@@ -1074,6 +1130,7 @@ def print_results(
         descriptor,
         result,
     ) in results:
+
         direction = (
             result.setup.direction
             if result.setup is not None
@@ -1084,6 +1141,7 @@ def print_results(
             result.confluence
             is not None
         ):
+
             print(
                 f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
@@ -1096,6 +1154,7 @@ def print_results(
             )
 
         else:
+
             print(
                 f"{base:<12} "
                 f"{descriptor.analysis_market:<14} "
@@ -1114,7 +1173,7 @@ def print_results(
 
 
 def main() -> None:
-    # Fix Windows PowerShell / cp1256 console encoding.
+
     if hasattr(
         sys.stdout,
         "reconfigure",
