@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from core.candle_store import CandleStore
+
 from microstructure.confluence_engine import (
     ConfluenceEngine,
 )
@@ -19,12 +21,16 @@ from microstructure.liquidity_sweep import (
 from microstructure.market_structure import (
     MarketStructureEngine,
 )
+from microstructure.session_engine import (
+    SessionEngine,
+)
 from microstructure.structure_break import (
     StructureBreakEngine,
 )
 from microstructure.structure_setup import (
     StructureSetupEngine,
 )
+
 from models.candle import Candle
 from models.confluence_result import (
     ConfluenceResult,
@@ -32,6 +38,7 @@ from models.confluence_result import (
 from models.structure_setup import (
     StructureSetup,
 )
+
 from services.live_data_freshness import (
     LiveDataFreshness,
 )
@@ -47,21 +54,58 @@ class LiveConfluenceResult:
     """
 
     symbol: str
+
     setup: StructureSetup | None
+
     confluence: ConfluenceResult | None
+
     status: str
+
     reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class CurrentSessionContext:
+    """
+    Current live session information.
+
+    This is intentionally separate from HistoricalContext.
+
+    HistoricalContext describes the market at the timestamp of
+    the structure setup.
+
+    CurrentSessionContext describes the market session at the
+    actual live execution time.
+    """
+
+    timestamp: int
+
+    session_name: str
+
+    session_quality: float
+
+    session_classification: str
+
+    execution_allowed: bool
+
+    is_overlap: bool
+
+    trade_count: int
+
+    order_flow_strength: float
+
+    cvd_strength: float
+
+    liquidity_ratio: float
 
 
 class LiveConfluenceService:
     """
     Live structure/confluence pipeline.
 
-    Production LIVE:
+    Historical pipeline:
 
         Candles
-          ↓
-        Freshness
           ↓
         Structure / MSS
           ↓
@@ -69,24 +113,43 @@ class LiveConfluenceService:
           ↓
         Structure Setup
           ↓
-        Historical Context
-          ↓
-        Current Order Book
-          ↓
-        Execution Gate
-
-    REST/Historical:
-
-        Candidate
+        Historical Trades
           ↓
         Historical Context
           ↓
         Historical Confluence
 
-    Historical calculations never use current Order Book.
+    Live pipeline:
+
+        Historical Structure Setup
+          ↓
+        Historical Context
+          ↓
+        Current Session
+          ↓
+        Current Order Book
+          ↓
+        Execution Gate
+
+    IMPORTANT:
+
+        Historical Context remains strictly as-of the setup
+        timestamp.
+
+        Current Session is evaluated separately and never
+        modifies HistoricalContext.
+
+        Current Order Book is never used in historical
+        calculations.
     """
 
     ORDER_BOOK_DEPTH = 20
+
+    # ============================================================
+    # SESSION
+    # ============================================================
+
+    SESSION_CURRENT_LOOKBACK_SECONDS = 300
 
     def __init__(
         self,
@@ -183,6 +246,10 @@ class LiveConfluenceService:
             order_book_depth
         )
 
+        self.session_engine = (
+            SessionEngine()
+        )
+
     # ============================================================
     # CANDLES
     # ============================================================
@@ -196,7 +263,9 @@ class LiveConfluenceService:
     ) -> list[Candle]:
 
         normalized_symbol = (
-            symbol.strip().upper()
+            symbol
+            .strip()
+            .upper()
         )
 
         stored = (
@@ -226,6 +295,7 @@ class LiveConfluenceService:
         }
 
         for candle in stored:
+
             merged[
                 int(candle.timestamp)
             ] = candle
@@ -312,12 +382,15 @@ class LiveConfluenceService:
         )
 
         if imbalance >= 0.15:
+
             wall_bias = "BULLISH"
 
         elif imbalance <= -0.15:
+
             wall_bias = "BEARISH"
 
         else:
+
             wall_bias = "NEUTRAL"
 
         best_bid = (
@@ -405,6 +478,374 @@ class LiveConfluenceService:
             return None
 
     # ============================================================
+    # CURRENT SESSION
+    # ============================================================
+
+    def _latest_current_trade_stats(
+        self,
+        symbol: str,
+    ) -> tuple[
+        int,
+        float,
+        float,
+        float,
+    ]:
+        """
+        Return recent trade statistics for the live session.
+
+        Returns:
+
+            trade_count
+            order_flow_strength
+            cvd_strength
+            liquidity_ratio
+
+        The method intentionally uses only the most recent
+        available trades.
+
+        If the configured TradeStore/API does not expose the
+        required data, safe zero values are returned.
+        """
+
+        normalized_symbol = (
+            symbol
+            .strip()
+            .upper()
+        )
+
+        trade_store = (
+            self.historical_context.trade_store
+        )
+
+        trades = []
+
+        # --------------------------------------------------------
+        # Try recent stored trades first.
+        # --------------------------------------------------------
+
+        recent_method = getattr(
+            trade_store,
+            "get_recent",
+            None,
+        )
+
+        if callable(
+            recent_method
+        ):
+
+            try:
+
+                trades = list(
+                    recent_method(
+                        symbol=normalized_symbol,
+                        limit=500,
+                    )
+                    or []
+                )
+
+            except TypeError:
+
+                try:
+
+                    trades = list(
+                        recent_method(
+                            normalized_symbol,
+                            500,
+                        )
+                        or []
+                    )
+
+                except Exception:
+
+                    trades = []
+
+            except Exception:
+
+                trades = []
+
+        # --------------------------------------------------------
+        # Fallback: get all stored trades and take the latest
+        # subset where supported.
+        # --------------------------------------------------------
+
+        if not trades:
+
+            all_method = getattr(
+                trade_store,
+                "get_trades",
+                None,
+            )
+
+            if callable(
+                all_method
+            ):
+
+                try:
+
+                    trades = list(
+                        all_method(
+                            symbol=normalized_symbol,
+                        )
+                        or []
+                    )
+
+                except TypeError:
+
+                    try:
+
+                        trades = list(
+                            all_method(
+                                normalized_symbol,
+                            )
+                            or []
+                        )
+
+                    except Exception:
+
+                        trades = []
+
+                except Exception:
+
+                    trades = []
+
+        if not trades:
+
+            return (
+                0,
+                0.0,
+                0.0,
+                0.0,
+            )
+
+        trades = sorted(
+            trades,
+            key=lambda trade: int(
+                getattr(
+                    trade,
+                    "timestamp",
+                    0,
+                )
+            ),
+        )
+
+        # Keep only the latest 500 trades.
+        trades = trades[-500:]
+
+        buy_volume = 0.0
+        sell_volume = 0.0
+
+        for trade in trades:
+
+            try:
+
+                volume = max(
+                    0.0,
+                    float(
+                        trade.volume
+                    ),
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                continue
+
+            side = str(
+                getattr(
+                    trade,
+                    "side",
+                    "",
+                )
+            ).strip().lower()
+
+            if side == "buy":
+
+                buy_volume += volume
+
+            elif side == "sell":
+
+                sell_volume += volume
+
+        total_volume = (
+            buy_volume
+            + sell_volume
+        )
+
+        if total_volume <= 0:
+
+            return (
+                len(trades),
+                0.0,
+                0.0,
+                0.0,
+            )
+
+        delta = (
+            buy_volume
+            - sell_volume
+        )
+
+        delta_pct = (
+            delta
+            / total_volume
+            * 100.0
+        )
+
+        order_flow_strength = min(
+            100.0,
+            abs(delta_pct),
+        )
+
+        # Current session liquidity-quality proxy.
+        balance = (
+            1.0
+            - abs(
+                buy_volume
+                - sell_volume
+            )
+            / total_volume
+        )
+
+        liquidity_activity = min(
+            1.0,
+            total_volume
+            / 1_000_000.0,
+        )
+
+        liquidity_ratio = max(
+            0.0,
+            min(
+                1.0,
+                balance * 0.7
+                + liquidity_activity * 0.3,
+            ),
+        )
+
+        # CVD strength is not reconstructed here from a second
+        # engine. For current session gating we use recent
+        # executed-flow strength as a conservative proxy.
+        cvd_strength = min(
+            100.0,
+            abs(delta_pct),
+        )
+
+        return (
+            len(trades),
+            order_flow_strength,
+            cvd_strength,
+            liquidity_ratio,
+        )
+
+    def current_session_context(
+        self,
+        symbol: str,
+        timestamp: int | None = None,
+    ) -> CurrentSessionContext:
+        """
+        Build current live session context.
+
+        This is separate from the historical setup/session.
+
+        timestamp:
+            Unix timestamp in seconds.
+            Defaults to current UTC time.
+        """
+
+        if timestamp is None:
+
+            timestamp = int(
+                datetime.now(
+                    timezone.utc
+                ).timestamp()
+            )
+
+        trade_count = 0
+        order_flow_strength = 0.0
+        cvd_strength = 0.0
+        liquidity_ratio = 0.0
+
+        try:
+
+            (
+                trade_count,
+                order_flow_strength,
+                cvd_strength,
+                liquidity_ratio,
+            ) = (
+                self._latest_current_trade_stats(
+                    symbol
+                )
+            )
+
+        except Exception:
+
+            pass
+
+        analysis = (
+            self.session_engine.analyze(
+                timestamp=int(
+                    timestamp
+                ),
+                trade_count=(
+                    trade_count
+                ),
+                order_flow_strength=(
+                    order_flow_strength
+                ),
+                cvd_strength=(
+                    cvd_strength
+                ),
+                liquidity_ratio=(
+                    liquidity_ratio
+                ),
+            )
+        )
+
+        return CurrentSessionContext(
+            timestamp=int(
+                timestamp
+            ),
+
+            session_name=(
+                analysis.name
+            ),
+
+            session_quality=(
+                analysis.quality
+            ),
+
+            session_classification=(
+                analysis.classification
+            ),
+
+            execution_allowed=(
+                analysis.execution_allowed
+            ),
+
+            is_overlap=(
+                analysis.is_overlap
+            ),
+
+            trade_count=(
+                analysis.trade_count
+            ),
+
+            order_flow_strength=(
+                order_flow_strength
+            ),
+
+            cvd_strength=(
+                cvd_strength
+            ),
+
+            liquidity_ratio=(
+                liquidity_ratio
+            ),
+        )
+
+    # ============================================================
     # BENCHMARK ORDER BOOK CONFIRMATION
     # ============================================================
 
@@ -421,11 +862,13 @@ class LiveConfluenceService:
 
         This bypasses candle freshness intentionally.
 
-        It is designed for feature-impact benchmarking.
+        Designed for feature-impact benchmarking.
         """
 
         normalized_symbol = (
-            symbol.strip().upper()
+            symbol
+            .strip()
+            .upper()
         )
 
         if setup is None:
@@ -525,7 +968,9 @@ class LiveConfluenceService:
     ]:
 
         normalized_symbol = (
-            symbol.strip().upper()
+            symbol
+            .strip()
+            .upper()
         )
 
         live_candle = (
@@ -694,7 +1139,9 @@ class LiveConfluenceService:
     ) -> LiveConfluenceResult:
 
         normalized_symbol = (
-            symbol.strip().upper()
+            symbol
+            .strip()
+            .upper()
         )
 
         (
@@ -816,7 +1263,7 @@ class LiveConfluenceService:
         )
 
     # ============================================================
-    # PRODUCTION EVALUATION
+    # COMPLETE EVALUATION
     # ============================================================
 
     def evaluate(
@@ -831,30 +1278,40 @@ class LiveConfluenceService:
         max_bars_after_sweep: int = 10,
         lookback_seconds: int = 3600,
         data_mode: str = LiveDataFreshness.LIVE,
+        current_timestamp: int | None = None,
     ) -> LiveConfluenceResult:
+        """
+        Run the complete live/historical confluence pipeline.
 
-        candidate = (
-            self.find_candidate(
-                symbol=symbol,
-                candles=candles,
-                timeframe=timeframe,
-                candle_limit=candle_limit,
-                swing_window=swing_window,
-                displacement_pct=(
-                    displacement_pct
-                ),
-                max_bars_after_sweep=(
-                    max_bars_after_sweep
-                ),
-                data_mode=data_mode,
-            )
+        HistoricalContext is always evaluated using the setup
+        timestamp.
+
+        Live Session is evaluated separately using the actual
+        current execution timestamp.
+        """
+
+        candidate = self.find_candidate(
+            symbol=symbol,
+            candles=candles,
+            timeframe=timeframe,
+            candle_limit=candle_limit,
+            swing_window=swing_window,
+            displacement_pct=(
+                displacement_pct
+            ),
+            max_bars_after_sweep=(
+                max_bars_after_sweep
+            ),
+            data_mode=data_mode,
         )
 
         if candidate.status != "CANDIDATE":
             return candidate
 
         normalized_symbol = (
-            symbol.strip().upper()
+            symbol
+            .strip()
+            .upper()
         )
 
         latest_setup = (
@@ -873,6 +1330,10 @@ class LiveConfluenceService:
                     "a setup."
                 ),
             )
+
+        # ========================================================
+        # HISTORICAL CONTEXT
+        # ========================================================
 
         try:
 
@@ -908,6 +1369,34 @@ class LiveConfluenceService:
                 reason=str(exc),
             )
 
+        # ========================================================
+        # CURRENT SESSION
+        # ========================================================
+
+        current_session = None
+
+        if (
+            data_mode
+            == LiveDataFreshness.LIVE
+        ):
+
+            try:
+
+                current_session = (
+                    self.current_session_context(
+                        symbol=normalized_symbol,
+                        timestamp=current_timestamp,
+                    )
+                )
+
+            except Exception:
+
+                current_session = None
+
+        # ========================================================
+        # CURRENT ORDER BOOK
+        # ========================================================
+
         live_order_book = None
 
         if (
@@ -921,6 +1410,16 @@ class LiveConfluenceService:
                 )
             )
 
+        # ========================================================
+        # CONFLUENCE SESSION OVERRIDE
+        # ========================================================
+
+        session_for_confluence = (
+            current_session
+            if current_session is not None
+            else context
+        )
+
         try:
 
             confluence = (
@@ -928,12 +1427,43 @@ class LiveConfluenceService:
                     setup=latest_setup,
                     context=context,
                     order_book=live_order_book,
+                    session=session_for_confluence,
                     live_mode=(
                         data_mode
                         == LiveDataFreshness.LIVE
                     ),
                 )
             )
+
+        except TypeError:
+
+            # Backward compatibility with versions whose
+            # HistoricalConfluenceEngine does not yet expose
+            # session= explicitly.
+
+            try:
+
+                confluence = (
+                    self.historical_confluence.evaluate(
+                        setup=latest_setup,
+                        context=context,
+                        order_book=live_order_book,
+                        live_mode=(
+                            data_mode
+                            == LiveDataFreshness.LIVE
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+
+                return LiveConfluenceResult(
+                    symbol=normalized_symbol,
+                    setup=latest_setup,
+                    confluence=None,
+                    status="CONFLUENCE_ERROR",
+                    reason=str(exc),
+                )
 
         except Exception as exc:
 
@@ -945,23 +1475,45 @@ class LiveConfluenceService:
                 reason=str(exc),
             )
 
+        # ========================================================
+        # REASON
+        # ========================================================
+
         if (
             data_mode
             == LiveDataFreshness.LIVE
         ):
 
-            if live_order_book is not None:
+            if (
+                current_session is not None
+                and live_order_book is not None
+            ):
 
                 reason = (
-                    "Live confluence evaluated with "
-                    "current Order Book execution gate."
+                    "Live confluence evaluated using "
+                    "current Session + current Order Book."
+                )
+
+            elif current_session is not None:
+
+                reason = (
+                    "Live confluence evaluated using "
+                    "current Session; Order Book unavailable."
+                )
+
+            elif live_order_book is not None:
+
+                reason = (
+                    "Live confluence evaluated using "
+                    "historical Session fallback + current "
+                    "Order Book."
                 )
 
             else:
 
                 reason = (
-                    "Live confluence evaluated, but "
-                    "current Order Book was unavailable."
+                    "Live confluence evaluated without "
+                    "current Session/Order Book context."
                 )
 
         else:
