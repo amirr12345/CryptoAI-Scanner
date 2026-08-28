@@ -35,11 +35,16 @@ class ConfluenceEngine:
         Order Book is optional/not applicable.
 
     Live evaluation:
-        Order Book confirmation is required for EXECUTE.
+        Current Order Book and Session Quality are required
+        for EXECUTE.
 
     RSI / MACD / EMA:
         intentionally excluded.
     """
+
+    # ============================================================
+    # PRIMARY SCORE WEIGHTS
+    # ============================================================
 
     STRUCTURE_WEIGHT = 25.0
     LIQUIDITY_WEIGHT = 15.0
@@ -59,20 +64,32 @@ class ConfluenceEngine:
 
     MAX_SCORE = 100.0
 
-    # ------------------------------------------------------------
-    # Order Book
-    # ------------------------------------------------------------
+    # ============================================================
+    # ORDER BOOK THRESHOLDS
+    # ============================================================
 
     OB_NEUTRAL_THRESHOLD = 0.10
     OB_MODERATE_OPPOSING = 0.20
     OB_STRONG_OPPOSING = 0.35
 
-    # ------------------------------------------------------------
-    # Session
-    # ------------------------------------------------------------
+    # ============================================================
+    # SESSION THRESHOLDS
+    # ============================================================
+
+    # From SessionEngine:
+    #
+    # >= 8.0 -> BEST / executable session
+    # 6.5-7.99 -> GOOD but not executable
+    # 5.0-6.49 -> NEUTRAL
+    # < 5.0 -> AVOID
+    #
 
     SESSION_EXECUTE_MIN = 8.0
     SESSION_WAIT_MIN = 5.0
+
+    # ============================================================
+    # MAIN EVALUATION
+    # ============================================================
 
     def evaluate(
         self,
@@ -90,12 +107,16 @@ class ConfluenceEngine:
         Evaluate one directional setup.
 
         live_mode=False:
-            Historical evaluation.
-            Order Book is optional/not applicable.
+            Historical analysis.
+
+            Order Book does not affect the score or historical
+            actionable state.
 
         live_mode=True:
-            Production live evaluation.
-            Current Order Book acts as an execution gate.
+            Production live execution.
+
+            Session Quality and current Order Book are execution
+            gates and do not modify the primary score.
         """
 
         direction = self._normalize_direction(
@@ -139,9 +160,9 @@ class ConfluenceEngine:
         conflicts: list[str] = []
         reasons: list[str] = []
 
-        # --------------------------------------------------------
-        # HistoricalContext fallback
-        # --------------------------------------------------------
+        # ========================================================
+        # Historical Context Fallback
+        # ========================================================
 
         if historical_context is not None:
 
@@ -178,9 +199,9 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
-        # PRIMARY SCORE
-        # --------------------------------------------------------
+        # ========================================================
+        # PRIMARY COMPONENTS
+        # ========================================================
 
         structure_points = (
             self._score_structure(
@@ -244,6 +265,10 @@ class ConfluenceEngine:
             )
         )
 
+        # ========================================================
+        # PRIMARY SCORE
+        # ========================================================
+
         raw_primary_score = (
             structure_points
             + liquidity_points
@@ -289,6 +314,7 @@ class ConfluenceEngine:
             not has_real_context
             or available_max_score <= 0
         ):
+
             score = 0.0
 
             reasons.append(
@@ -312,14 +338,15 @@ class ConfluenceEngine:
             ),
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # SESSION
-        # --------------------------------------------------------
+        # ========================================================
 
-        session_quality, session_name = (
-            self._extract_session(
-                session=session
-            )
+        (
+            session_quality,
+            session_name,
+        ) = self._extract_session(
+            session=session
         )
 
         self._append_session_reason(
@@ -329,12 +356,9 @@ class ConfluenceEngine:
             reasons=reasons,
         )
 
-        # --------------------------------------------------------
-        # ORDER BOOK
-        #
-        # Diagnostic only for score.
-        # Execution gate decides its live effect.
-        # --------------------------------------------------------
+        # ========================================================
+        # CURRENT ORDER BOOK
+        # ========================================================
 
         order_book_imbalance = 0.0
 
@@ -350,6 +374,10 @@ class ConfluenceEngine:
                 )
             )
 
+        # Diagnostic only.
+        #
+        # NEVER added to primary score.
+
         order_book_points = (
             self._diagnostic_order_book_score(
                 direction=direction,
@@ -357,18 +385,18 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # GRADE
-        # --------------------------------------------------------
+        # ========================================================
 
         grade = self._grade(
             score=score,
             conflicts=len(conflicts),
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # EXECUTION GATE
-        # --------------------------------------------------------
+        # ========================================================
 
         execution_status = (
             self._execution_gate(
@@ -386,9 +414,9 @@ class ConfluenceEngine:
             )
         )
 
-        # --------------------------------------------------------
+        # ========================================================
         # ACTIONABLE
-        # --------------------------------------------------------
+        # ========================================================
 
         if live_mode:
 
@@ -405,8 +433,8 @@ class ConfluenceEngine:
 
         else:
 
-            # Historical evaluation:
-            # Order Book is not required.
+            # Historical evaluation.
+
             actionable = (
                 grade in {
                     "A+",
@@ -1023,6 +1051,7 @@ class ConfluenceEngine:
             absolute_imbalance
             < self.OB_NEUTRAL_THRESHOLD
         ):
+
             return 5.0
 
         if aligned:
@@ -1045,12 +1074,14 @@ class ConfluenceEngine:
             absolute_imbalance
             < self.OB_MODERATE_OPPOSING
         ):
+
             return 4.0
 
         if (
             absolute_imbalance
             < self.OB_STRONG_OPPOSING
         ):
+
             return 2.0
 
         return 0.0
@@ -1072,19 +1103,17 @@ class ConfluenceEngine:
         live_mode: bool,
     ) -> str:
 
-        # --------------------------------------------------------
-        # Historical mode
-        #
-        # Order Book is not required.
-        # --------------------------------------------------------
+        # ========================================================
+        # HISTORICAL
+        # ========================================================
 
         if not live_mode:
 
             if conflicts:
 
                 reasons.append(
-                    "Historical evaluation contains primary "
-                    "market conflict."
+                    "Historical evaluation contains "
+                    "primary market conflict."
                 )
 
                 return "BLOCK"
@@ -1093,6 +1122,11 @@ class ConfluenceEngine:
                 "A+",
                 "A",
             }:
+
+                reasons.append(
+                    f"Historical execution state is WAIT "
+                    f"because grade={grade}."
+                )
 
                 return "WAIT"
 
@@ -1112,9 +1146,9 @@ class ConfluenceEngine:
 
             return "HISTORICAL_OK"
 
-        # --------------------------------------------------------
-        # LIVE mode
-        # --------------------------------------------------------
+        # ========================================================
+        # LIVE
+        # ========================================================
 
         if conflicts:
 
@@ -1136,19 +1170,68 @@ class ConfluenceEngine:
 
             return "WAIT"
 
+        # --------------------------------------------------------
+        # SESSION GATE
+        #
+        # This is the important correction.
+        #
+        # SessionEngine says:
+        #
+        #     >= 8.0  -> BEST
+        #     < 8.0   -> not executable
+        #
+        # Therefore a live signal cannot EXECUTE in London/NY/
+        # Asia/etc solely because the clock says so.
+        # The measured session quality must be >= 8.
+        # --------------------------------------------------------
+
+        if session_quality <= 0.0:
+
+            reasons.append(
+                "Execution gate = WAIT because Session Quality "
+                "is unavailable."
+            )
+
+            return "WAIT"
+
         if (
-            session_quality > 0
-            and
             session_quality
             < self.SESSION_WAIT_MIN
         ):
 
             reasons.append(
-                "Execution gate = WAIT because session "
-                f"quality={session_quality:.2f}/10."
+                "Execution gate = BLOCK because Session Quality "
+                f"is too low: {session_quality:.2f}/10."
+            )
+
+            return "BLOCK"
+
+        if (
+            session_quality
+            < self.SESSION_EXECUTE_MIN
+        ):
+
+            reasons.append(
+                "Execution gate = WAIT because Session Quality "
+                f"={session_quality:.2f}/10 is below the "
+                f"{self.SESSION_EXECUTE_MIN:.2f}/10 "
+                "execution threshold."
             )
 
             return "WAIT"
+
+        confirmations.append(
+            "Session Quality permits execution"
+        )
+
+        reasons.append(
+            f"Session Quality={session_quality:.2f}/10 "
+            f"meets execution threshold."
+        )
+
+        # --------------------------------------------------------
+        # ORDER BOOK
+        # --------------------------------------------------------
 
         if order_book is None:
 
@@ -1175,6 +1258,33 @@ class ConfluenceEngine:
             )
         )
 
+        # --------------------------------------------------------
+        # Neutral Order Book
+        # --------------------------------------------------------
+
+        if (
+            aligned
+            and
+            absolute_imbalance
+            < self.OB_NEUTRAL_THRESHOLD
+        ):
+
+            confirmations.append(
+                "Order Book neutral; no immediate "
+                "liquidity conflict"
+            )
+
+            reasons.append(
+                "Execution gate = EXECUTE: "
+                "Order Book is neutral."
+            )
+
+            return "EXECUTE"
+
+        # --------------------------------------------------------
+        # Supporting Order Book
+        # --------------------------------------------------------
+
         if aligned:
 
             confirmations.append(
@@ -1189,13 +1299,17 @@ class ConfluenceEngine:
 
             return "EXECUTE"
 
+        # --------------------------------------------------------
+        # Opposing Order Book
+        # --------------------------------------------------------
+
         if (
             absolute_imbalance
             < self.OB_MODERATE_OPPOSING
         ):
 
             reasons.append(
-                f"Execution gate = WAIT: mild opposing "
+                "Execution gate = WAIT: mild opposing "
                 f"Order Book imbalance="
                 f"{order_book_imbalance:.3f}."
             )
@@ -1208,7 +1322,7 @@ class ConfluenceEngine:
         ):
 
             reasons.append(
-                f"Execution gate = WAIT: material opposing "
+                "Execution gate = WAIT: material opposing "
                 f"Order Book imbalance="
                 f"{order_book_imbalance:.3f}."
             )
@@ -1216,7 +1330,7 @@ class ConfluenceEngine:
             return "WAIT"
 
         reasons.append(
-            f"Execution gate = BLOCK: extreme opposing "
+            "Execution gate = BLOCK: extreme opposing "
             f"Order Book imbalance="
             f"{order_book_imbalance:.3f}."
         )
@@ -1313,6 +1427,7 @@ class ConfluenceEngine:
         for attribute in (
             "session_quality",
             "quality_score",
+            "quality",
         ):
 
             value = getattr(
@@ -1461,6 +1576,7 @@ class ConfluenceEngine:
                 float("inf"),
                 float("-inf"),
             }:
+
                 return 0.0
 
             return result
@@ -1469,6 +1585,7 @@ class ConfluenceEngine:
             TypeError,
             ValueError,
         ):
+
             return 0.0
 
     @staticmethod
